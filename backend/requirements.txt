@@ -13,6 +13,8 @@ pydantic-settings==2.5.2
 python-multipart==0.0.12
 beautifulsoup4==4.12.3
 lxml==5.3.0
+lxml_html_clean>=0.4.0  # trafilatura/justext 在 lxml>=5.2 需要(lxml.html.clean 已拆为独立包)
+trafilatura>=2.0.0,<3  # 通用网页正文提取(质量更稳,正文/视频号等 JS 页配合 Playwright)
 markdownify==0.13.1
 readability-lxml==0.8.1
 jinja2==3.1.4

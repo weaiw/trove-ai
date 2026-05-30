@@ -21,6 +21,7 @@ router = APIRouter(prefix="/assistant", tags=["assistant"])
 class AskRequest(BaseModel):
     question: str
     top_k: int = 5
+    article_id: Optional[str] = None  # 锁定单篇:仅基于该文章整篇正文回答,不做全库检索
 
 
 class Citation(BaseModel):
@@ -58,9 +59,81 @@ def _get_llm_config():
     }
 
 
+async def _call_llm(prompt: str, system: str) -> str:
+    """Call the configured OpenAI-compatible chat endpoint and return the answer text."""
+    llm_config = _get_llm_config()
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            f"{llm_config['api_base']}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {llm_config['api_key']}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": llm_config["model"],
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 2048,
+            },
+        )
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def _answer_single_article(req: AskRequest, session: AsyncSession, current_user: User) -> AskResponse:
+    """本文问答:把指定文章整篇正文塞进上下文,严格基于该篇回答(不做全库检索)。"""
+    row = (await session.execute(
+        text("SELECT id, title, clean_content, raw_content FROM articles WHERE id = :aid AND user_id = :uid"),
+        {"aid": req.article_id, "uid": current_user.id},
+    )).fetchone()
+    if not row:
+        return AskResponse(answer="未找到该文章，或你无权访问。", citations=[])
+
+    article_id, title, clean_content, raw_content = row
+    content = (clean_content or raw_content or "").strip()
+    if not content:
+        return AskResponse(answer="这篇文章还没有可用的正文内容，无法基于它回答。", citations=[])
+
+    # 整篇入上下文(留出回答与 prompt 余量),长文按字符截断
+    context = content[:12000]
+    truncated = len(content) > 12000
+
+    prompt = f"""请仅依据下面这篇文章的内容回答用户的问题。
+
+要求：
+1. 只能基于本文内容作答，不要引入文章之外的知识或编造
+2. 若本文内容不足以回答，请明确说明"本文未涉及"
+3. 回答简洁、准确，可适当引用原文关键句
+{"4. 注意：本文较长，提供给你的是前半部分内容，若答案可能在后文，请说明" if truncated else ""}
+
+--- 文章《{title or "Untitled"}》 ---
+{context}
+--- 结束 ---
+
+用户问题: {req.question}
+
+请回答："""
+
+    answer = await _call_llm(prompt, "你是一个阅读助手，严格基于用户当前正在阅读的这篇文章作答。")
+    citations = [Citation(
+        article_id=str(article_id),
+        title=title or "Untitled",
+        chunk=(context[:2000] + "...") if len(context) > 2000 else context,
+        relevance_score=1.0,
+    )]
+    return AskResponse(answer=answer, citations=citations)
+
+
 @router.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, session: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """RAG pipeline: embed question → semantic search → build prompt → LLM answer"""
+
+    # 传了 article_id → 切到"本文问答"模式:整篇正文入上下文,不做全库向量检索
+    if req.article_id:
+        return await _answer_single_article(req, session, current_user)
     
     # Step 1: Embed the question
     question_embedding = await llm_service.get_embedding(req.question, emb_type="query")
@@ -133,26 +206,6 @@ async def ask(req: AskRequest, session: AsyncSession = Depends(get_db), current_
 请回答（并在末尾列出引用来源）："""
 
     # Step 5: Call LLM
-    llm_config = _get_llm_config()
-    
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            f"{llm_config['api_base']}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {llm_config['api_key']}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": llm_config["model"],
-                "messages": [
-                    {"role": "system", "content": "你是一个专业的知识库AI助手，基于知识库内容准确回答问题。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.3,
-                "max_tokens": 2048
-            }
-        )
-        data = resp.json()
-        answer = data["choices"][0]["message"]["content"]
+    answer = await _call_llm(prompt, "你是一个专业的知识库AI助手，基于知识库内容准确回答问题。")
 
     return AskResponse(answer=answer, citations=citations)

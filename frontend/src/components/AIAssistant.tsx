@@ -5,7 +5,7 @@ import {
   Brain, X, Send, Loader2, ChevronDown, ChevronUp, ExternalLink,
   Sparkles, Wrench, BookOpen, MessageSquare,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AskResponse, Citation } from "@/lib/types";
@@ -87,6 +87,19 @@ export default function AIAssistant() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+  const pathname = usePathname();
+
+  // 在文章详情页 /read/<id> 时,助手可锁定"本文问答"
+  const articleId = (() => {
+    const m = pathname?.match(/^\/read\/([^/?#]+)/);
+    return m ? m[1] : null;
+  })();
+  // scope: "article" = 仅基于当前文章; "library" = 全库检索
+  const [scope, setScope] = useState<"article" | "library">("library");
+  // 进入/离开详情页时重置默认:详情页默认本文,其它页只能全库
+  useEffect(() => {
+    setScope(articleId ? "article" : "library");
+  }, [articleId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -173,7 +186,7 @@ export default function AIAssistant() {
   );
 
   // ── Single-shot RAG (/api/assistant/ask) ──
-  const runFastRAG = useCallback(async (q: string, msgIdx: number) => {
+  const runFastRAG = useCallback(async (q: string, msgIdx: number, articleId?: string | null) => {
     const token = typeof window !== "undefined" ? localStorage.getItem("trove_token") : null;
     const res = await fetch("/api/assistant/ask", {
       method: "POST",
@@ -181,7 +194,11 @@ export default function AIAssistant() {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ question: q, top_k: 5 }),
+      body: JSON.stringify({
+        question: q,
+        top_k: 5,
+        ...(articleId ? { article_id: articleId } : {}),
+      }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data: AskResponse = await res.json();
@@ -232,18 +249,27 @@ export default function AIAssistant() {
     // Determine mode
     let mode: "fast" | "research" | "agent" | "spark" = "fast";
     let query = raw;
+    let explicitCmd = false;
     if (raw.startsWith("/c ") || raw.startsWith("/create ")) {
       mode = "spark";
       query = raw.replace(/^\/(c|create) /, "").trim();
+      explicitCmd = true;
     } else if (raw.startsWith("/a ") || raw.startsWith("/agent ")) {
       mode = "agent";
       query = raw.replace(/^\/(a|agent) /, "").trim();
+      explicitCmd = true;
     } else if (raw.startsWith("/r ") || raw.startsWith("/research ")) {
       mode = "research";
       query = raw.replace(/^\/(r|research) /, "").trim();
+      explicitCmd = true;
     } else if (isComplexQuery(raw)) {
       mode = "research";
     }
+
+    // 本文问答:未显式 /r /a /c 时,锁定当前文章走单点 RAG
+    // (不被「梳理/对比」等复杂问题自动升级为全库深度研究)
+    const useArticleScope = scope === "article" && !!articleId && !explicitCmd;
+    if (useArticleScope) mode = "fast";
 
     if (!query) {
       setMessages((prev) => [
@@ -272,7 +298,7 @@ export default function AIAssistant() {
 
     try {
       if (mode === "fast") {
-        await runFastRAG(query, assistantIdx);
+        await runFastRAG(query, assistantIdx, useArticleScope ? articleId : null);
       } else if (mode === "research") {
         await streamResearch(query, "/api/research/ask", assistantIdx);
       } else if (mode === "agent") {
@@ -534,6 +560,39 @@ export default function AIAssistant() {
 
           {/* Input */}
           <div className="px-4 py-3 border-t border-gray-100 dark:border-gray-800 shrink-0">
+            {/* Scope toggle — only on an article detail page */}
+            {articleId && (
+              <div className="pb-2 flex items-center gap-2">
+                <span className="text-[11px] text-gray-400 dark:text-gray-500">范围</span>
+                <div className="inline-flex rounded-lg bg-gray-100 dark:bg-gray-800 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setScope("article")}
+                    className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                      scope === "article"
+                        ? "bg-white dark:bg-gray-700 text-[var(--accent)] font-medium shadow-sm"
+                        : "text-gray-500 dark:text-gray-400"
+                    }`}
+                  >
+                    📄 本文
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setScope("library")}
+                    className={`text-[11px] px-2.5 py-1 rounded-md transition-colors ${
+                      scope === "library"
+                        ? "bg-white dark:bg-gray-700 text-[var(--accent)] font-medium shadow-sm"
+                        : "text-gray-500 dark:text-gray-400"
+                    }`}
+                  >
+                    📚 全库
+                  </button>
+                </div>
+                {scope === "article" && (
+                  <span className="text-[10px] text-gray-400 dark:text-gray-500">仅基于当前文章回答</span>
+                )}
+              </div>
+            )}
             <div className="flex gap-2">
               <input
                 ref={inputRef}

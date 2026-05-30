@@ -38,7 +38,8 @@ It's yours to host. It's yours to keep.
 <td width="50%" valign="top">
 
 #### 📥 Multi-platform capture
-WeChat 公众号 · 头条 · 抖音 · 小红书 · B 站 · Medium · CSDN · 掘金 — and any OpenGraph-aware URL.
+WeChat 公众号 · **视频号 (WeChat Channels)** · 头条 · 抖音 · 小红书 · B 站 · Medium · CSDN · 掘金 — and any OpenGraph-aware URL.
+JS-rendered & no-parser pages (视频号, CSDN, Medium, …) are extracted via a *trafilatura → headless-Chromium render → BeautifulSoup* cascade for clean main-content.
 Ingestion via: browser bookmark, WeChat Bot, paste, upload (PDF/DOCX/EPUB/etc), one-sentence Spark generation.
 
 </td>

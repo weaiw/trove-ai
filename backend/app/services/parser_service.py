@@ -142,57 +142,189 @@ class ParserService:
         if platform == 'xhs':
             return await self._fetch_xhs(url)
 
-        headers = self._get_headers(platform, url)
-        
-        async with httpx.AsyncClient(
-            timeout=30.0,
-            follow_redirects=True,
-        ) as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            
-            html = resp.text
-            soup = BeautifulSoup(html, 'lxml')
-            
-            # Extract OG metadata as fallback
-            og_meta = self._extract_og_metadata(soup)
-            
-            # Remove unwanted elements
+        # P5: 通用网页 — trafilatura 优先,内容过短再 Playwright 渲染,最后 BeautifulSoup 兜底
+        # 视频号(channels.weixin.qq.com)、CSDN、掘金、Medium、少数派、36氪 等 JS 动态页同走此路
+        return await self._fetch_generic(url, platform)
+
+    # ── 通用网页提取级联 ──────────────────────────────────────────────
+    # trafilatura(快、正文质量稳)→ 内容过短则 Playwright 渲染后重试 → BeautifulSoup 兜底。
+    _MIN_CONTENT_CHARS = 200  # 正文纯文本短于此值视为提取不足,触发下一级
+
+    @staticmethod
+    def _text_len(html_or_text: Optional[str]) -> int:
+        if not html_or_text:
+            return 0
+        return len(BeautifulSoup(html_or_text, 'lxml').get_text(strip=True))
+
+    def _trafilatura_extract(self, html: str, url: str) -> Optional[str]:
+        """用 trafilatura 提取正文(输出 HTML,保持与下游 clean_to_markdown 一致)。失败/未装返回 None。"""
+        try:
+            import trafilatura
+        except ImportError:
+            return None
+        try:
+            return trafilatura.extract(
+                html, url=url, output_format='html',
+                include_images=True, include_links=True, include_tables=True,
+                include_formatting=True,
+            )
+        except Exception as e:
+            logger.warning(f"trafilatura extract failed for {url}: {e}")
+            return None
+
+    async def _render_with_playwright(self, url: str) -> Optional[str]:
+        """复用现成 headless Chromium 渲染 JS 动态页,返回完整 HTML。失败返回 None。"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return None
+        ua = self._get_headers('other', url)['User-Agent']
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-blink-features=AutomationControlled'],
+                )
+                ctx = await browser.new_context(
+                    user_agent=ua, viewport={'width': 1920, 'height': 1080}, locale='zh-CN',
+                )
+                page = await ctx.new_page()
+                try:
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                except Exception as e:
+                    logger.warning(f"playwright nav {url}: {e}")
+                import asyncio as _a
+                await _a.sleep(3)  # 给 CSR 一点渲染时间
+                html = await page.content()
+                await browser.close()
+                return html
+        except Exception as e:
+            logger.warning(f"playwright render failed for {url}: {e}")
+            return None
+
+    def _build_generic_result(self, html: str, url: str, platform: str) -> Dict:
+        """从原始 HTML 构建解析结果:trafilatura 优先,BeautifulSoup 兜底;元数据走 OG/soup。"""
+        soup = BeautifulSoup(html, 'lxml')
+        og_meta = self._extract_og_metadata(soup)
+
+        # 1) trafilatura 优先(正文 HTML)
+        content_html = self._trafilatura_extract(html, url)
+
+        # 2) 回退:BeautifulSoup 启发式清洗 + 提取
+        if not content_html or self._text_len(content_html) < self._MIN_CONTENT_CHARS:
             for tag in soup.find_all(['script', 'style', 'nav', 'footer', 'iframe', 'noscript']):
                 tag.decompose()
-            
-            # Remove common ad/comment elements with exact class matching
-            # Use word boundaries to avoid substring matches (e.g. 'comment' matching 'comment_feature')
+            # 精确类名匹配,避免子串误伤(如 'comment' 命中 'comment_feature')
             for cls in ['advertisement', 'comment', 'recommend', 'related', 'sidebar', 'share',
                         'sharing', 'bottom-bar', 'toolbar', 'report', 'copyright']:
                 pattern = re.compile(r'(?:^|\s)' + re.escape(cls) + r'(?:\s|$)', re.I)
                 for tag in soup.find_all(class_=pattern):
                     tag.decompose()
-            
-            # Platform-specific content extraction
             content_html = self._extract_content(soup, platform, og_meta)
-            
-            # Extract metadata
-            title = og_meta.get('title') or self._extract_title(soup, platform)
-            author = og_meta.get('author') or self._extract_author(soup, platform)
-            cover = og_meta.get('image') or self._extract_cover(soup, platform)
-            
-            # For WeChat, rewrite cover image URL to go through proxy
-            # (mmbiz.qpic.cn has referer-based hotlink protection)
-            if cover and 'mmbiz.qpic.cn' in cover:
-                from urllib.parse import quote
-                cover = f"/api/images/proxy?url={quote(cover, safe='')}"
-            
-            return {
-                'title': title,
-                'raw_html': html,
-                'raw_content': content_html,
-                'platform': platform,
-                'author': author,
-                'cover_image': cover,
-                'og_meta': og_meta,
-            }
-    
+
+        title = og_meta.get('title') or self._extract_title(soup, platform)
+        author = og_meta.get('author') or self._extract_author(soup, platform)
+        cover = og_meta.get('image') or self._extract_cover(soup, platform)
+
+        # WeChat/视频号 封面图走代理(mmbiz.qpic.cn 有 referer 防盗链)
+        if cover and 'mmbiz.qpic.cn' in cover:
+            from urllib.parse import quote
+            cover = f"/api/images/proxy?url={quote(cover, safe='')}"
+
+        return {
+            'title': title,
+            'raw_html': html,
+            'raw_content': content_html,
+            'platform': platform,
+            'author': author,
+            'cover_image': cover,
+            'og_meta': og_meta,
+        }
+
+    async def _fetch_generic(self, url: str, platform: str) -> Dict:
+        """通用网页抓取 + 提取级联。"""
+        headers = self._get_headers(platform, url)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            html = resp.text
+
+        result = self._build_generic_result(html, url, platform)
+
+        # 内容过短 → 大概率是 JS 动态渲染页(视频号/部分前端框架站),Playwright 渲染后重试,取更长者
+        if self._text_len(result['raw_content']) < self._MIN_CONTENT_CHARS:
+            rendered = await self._render_with_playwright(url)
+            if rendered:
+                alt = self._build_generic_result(rendered, url, platform)
+                if self._text_len(alt['raw_content']) > self._text_len(result['raw_content']):
+                    logger.info(f"generic fetch: playwright render improved content for {url}")
+                    result = alt
+        return result
+
+    # ── 通用提取辅助(供 _build_generic_result 兜底使用) ──────────────
+    def _extract_content(self, soup: BeautifulSoup, platform: str, og_meta: Dict) -> str:
+        """Extract main content based on platform-specific selectors."""
+        content_html = ""
+
+        # 公众号/视频号(channels.weixin.qq.com → 'wechat')正文容器
+        if platform == 'wechat':
+            article = soup.find('div', id='js_content') or soup.find('div', class_='rich_media_content')
+            if article:
+                content_html = str(article)
+
+        # Generic extraction fallback
+        if not content_html:
+            article = soup.find('article')
+            if article:
+                content_html = str(article)
+            else:
+                for selector in [
+                    {'name': 'div', 'attrs': {'class': 'article-content'}},
+                    {'name': 'div', 'attrs': {'class': 'post-content'}},
+                    {'name': 'div', 'attrs': {'class': 'entry-content'}},
+                    {'name': 'div', 'attrs': {'id': 'content'}},
+                    {'name': 'main', 'attrs': {}},
+                ]:
+                    article = soup.find(selector['name'], selector['attrs'])
+                    if article:
+                        content_html = str(article)
+                        break
+
+        # Final fallback: whole body
+        if not content_html:
+            body = soup.find('body')
+            content_html = str(body) if body else str(soup)
+        return content_html
+
+    def _extract_title(self, soup: BeautifulSoup, platform: str) -> str:
+        """Extract article title."""
+        h1 = soup.find('h1')
+        if h1 and h1.get_text(strip=True):
+            return h1.get_text(strip=True)
+        title_tag = soup.find('title')
+        if title_tag:
+            return title_tag.get_text(strip=True)
+        return "Untitled"
+
+    def _extract_author(self, soup: BeautifulSoup, platform: str) -> str:
+        """Extract article author."""
+        for selector in [
+            {'name': 'a', 'attrs': {'class': 'author'}},
+            {'name': 'span', 'attrs': {'class': 'author'}},
+            {'name': 'div', 'attrs': {'class': 'author'}},
+        ]:
+            tag = soup.find(selector['name'], selector['attrs'])
+            if tag and tag.get_text(strip=True):
+                return tag.get_text(strip=True)
+        return ""
+
+    def _extract_cover(self, soup: BeautifulSoup, platform: str) -> str:
+        """Extract cover image."""
+        og_img = soup.find('meta', property='og:image')
+        if og_img:
+            return og_img.get('content', '')
+        return ""
+
     async def _fetch_bilibili(self, url: str) -> Dict:
         """Bilibili: route by URL shape.
         - 专栏 (read/cv...) and opus (新版图文动态/笔记): HTML scrape
