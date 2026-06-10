@@ -145,6 +145,9 @@ async def test_config(group_name: str, body: dict):
             result = await test_llm_connection(body)
         elif group_name == "embedding":
             result = await test_embedding_connection(body)
+        elif group_name in CONFIG_SCHEMA and not CONFIG_SCHEMA[group_name].get("test_provider"):
+            # Config groups without a connectivity test (e.g. xhs cookie)
+            return {"ok": True, "message": "该配置无连通性测试，保存即可生效", "latency_ms": 0}
         else:
             return {"success": False, "message": f"未知配置组: {group_name}"}
         latency_ms = round((time.time() - t0) * 1000)
@@ -164,22 +167,29 @@ async def update_config(group_name: str, body: dict):
     body = _merge_with_saved(group_name, body or {})
     t0 = time.time()
 
-    # Test connectivity first
-    try:
-        if group_name == "llm":
-            test_result = await test_llm_connection(body)
-        elif group_name == "embedding":
-            test_result = await test_embedding_connection(body)
-        else:
-            return {"success": False, "message": f"未知配置组: {group_name}"}
-    except Exception as e:
-        return {"success": False, "message": f"连通性测试异常: {str(e)}，配置未保存"}
+    # Test connectivity first (groups without test_provider skip the gate)
+    skip_test = (
+        group_name in CONFIG_SCHEMA
+        and not CONFIG_SCHEMA[group_name].get("test_provider")
+    )
+    if skip_test:
+        test_result = {"ok": True}
+    else:
+        try:
+            if group_name == "llm":
+                test_result = await test_llm_connection(body)
+            elif group_name == "embedding":
+                test_result = await test_embedding_connection(body)
+            else:
+                return {"success": False, "message": f"未知配置组: {group_name}"}
+        except Exception as e:
+            return {"success": False, "message": f"连通性测试异常: {str(e)}，配置未保存"}
 
-    if not test_result.get("ok"):
-        return {
-            "success": False,
-            "message": f"连通性测试失败: {test_result.get('error') or test_result.get('message', '未知错误')}，配置未保存",
-        }
+        if not test_result.get("ok"):
+            return {
+                "success": False,
+                "message": f"连通性测试失败: {test_result.get('error') or test_result.get('message', '未知错误')}，配置未保存",
+            }
 
     latency_ms = round((time.time() - t0) * 1000)
 

@@ -1129,28 +1129,43 @@ class ParserService:
             'Chrome/124.0.0.0 Safari/537.36'
         )
 
+        # Load web_session cookie if user configured one (Settings → 小红书).
+        # Empty when unconfigured — request stays anonymous, identical to before.
+        from app.config_manager import get_effective_config
+        xhs_cookie = (get_effective_config('xhs') or {}).get('web_session', '').strip()
+
         html = ""
         final_url = url
         try:
             from curl_cffi import requests as curl_requests
+            headers = {
+                'User-Agent': desktop_ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Referer': 'https://www.xiaohongshu.com/',
+            }
+            if xhs_cookie:
+                headers['Cookie'] = f'web_session={xhs_cookie}'
             resp = curl_requests.get(
                 url,
-                headers={
-                    'User-Agent': desktop_ua,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Referer': 'https://www.xiaohongshu.com/',
-                },
+                headers=headers,
                 impersonate='chrome124',
                 timeout=20,
                 allow_redirects=True,
             )
             html = resp.text or ""
             final_url = str(resp.url) if hasattr(resp, 'url') else url
-            # If we got bounced to the sec page, drop the body — Playwright will
-            # have a better shot.
-            if '/404/sec_' in final_url or 'xhs_sec_server' in final_url:
-                logger.info(f"XHS curl_cffi got sec page, trying Playwright. final={final_url[:120]}")
+            # If we got bounced to a sec / 404 page, drop the body — Playwright
+            # may still have a shot, and we avoid feeding 404 HTML to the state
+            # extractor (which then mis-reports "success" with no note).
+            from urllib.parse import urlparse as _urlparse
+            _parsed = _urlparse(final_url)
+            if (
+                _parsed.path.startswith('/404')
+                or 'xhs_sec_server' in final_url
+                or 'errorCode=-510001' in final_url
+            ):
+                logger.info(f"XHS curl_cffi got sec/404 page, trying Playwright. final={final_url[:120]}")
                 html = ""
             else:
                 logger.info(f"XHS curl_cffi: {len(html)} chars, final={final_url[:120]}")
@@ -1162,7 +1177,7 @@ class ParserService:
 
         # Fallback to Playwright if state parsing failed
         if note is None:
-            note, html_pw, final_url_pw = await _xhs_playwright_fetch(url, desktop_ua)
+            note, html_pw, final_url_pw = await _xhs_playwright_fetch(url, desktop_ua, xhs_cookie)
             if html_pw:
                 html = html_pw
             if final_url_pw:
@@ -1179,7 +1194,8 @@ class ParserService:
 
         if note is None and not og_meta.get('title'):
             raise ValueError(
-                "Could not extract XHS note data. The link may be expired or invalid."
+                "小红书拒绝了访问，可能是分享链 token 过期或服务器 IP 被风控。"
+                "若多次失败，请到「设置 → 小红书」配置 web_session cookie。"
             )
 
         # ── Extract fields ──
@@ -1459,11 +1475,14 @@ def _extract_xhs_video_url(note: dict) -> Optional[str]:
     return None
 
 
-async def _xhs_playwright_fetch(url: str, ua: str):
+async def _xhs_playwright_fetch(url: str, ua: str, cookie: Optional[str] = None):
     """Playwright fallback for XHS: renders the page with desktop UA, captures HTML.
 
     XHS reliably rejects iPhone-mobile UAs (sec_server redirect); desktop Chrome
     UA passes through to /explore/<id> with full noteDetailMap state.
+
+    If `cookie` is provided, it's injected as web_session — same effect as a
+    logged-in browser session and usually bypasses sec_server / -510001.
 
     Returns (note_dict_or_None, html, final_url).
     """
@@ -1486,6 +1505,13 @@ async def _xhs_playwright_fetch(url: str, ua: str):
                 viewport={'width': 1920, 'height': 1080},
                 locale='zh-CN',
             )
+            if cookie:
+                await ctx.add_cookies([{
+                    'name': 'web_session',
+                    'value': cookie,
+                    'domain': '.xiaohongshu.com',
+                    'path': '/',
+                }])
             page = await ctx.new_page()
             try:
                 await page.goto(url, wait_until='domcontentloaded', timeout=30000)
