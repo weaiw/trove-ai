@@ -5,6 +5,7 @@ import WechatBinding from '@/components/WechatBinding';
 import ReviewSettings from '@/components/ReviewSettings';
 import ObsidianBackup from '@/components/ObsidianBackup';
 import KbPurpose from '@/components/KbPurpose';
+import McpAccess from '@/components/McpAccess';
 
 export default function MyPage() {
   return (
@@ -18,6 +19,7 @@ export default function MyPage() {
       <WechatBinding />
       <ReviewSettings />
       <ObsidianBackup />
+      <McpAccess />
     </div>
   );
 }
