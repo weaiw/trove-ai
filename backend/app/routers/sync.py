@@ -350,16 +350,21 @@ PLUGIN_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", 
 PLUGIN_FILES = ["main.js", "manifest.json", "styles.css"]
 
 
+PLUGIN_RELEASES_URL = "https://github.com/weaiw/trove-sync-obsidian/releases/latest"
+
+
 @router.get("/plugin-download")
 async def download_plugin():
-    """Stream a zip containing the Trove AI Sync Obsidian plugin. Public
-    (no auth) — the plugin source is meant to be installable by anyone."""
+    """Get the Trove AI Sync Obsidian plugin. Public (no auth).
+
+    The plugin is distributed from its own repo's GitHub Releases; this OSS
+    backend does not bundle the built artifacts. If a self-hoster has dropped
+    them into static/obsidian-plugin/ we serve a zip; otherwise we redirect to
+    the latest Release."""
+    from fastapi.responses import RedirectResponse
     missing = [f for f in PLUGIN_FILES if not os.path.exists(os.path.join(PLUGIN_DIR, f))]
     if missing:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Plugin artifacts not bundled in image: {missing}",
-        )
+        return RedirectResponse(url=PLUGIN_RELEASES_URL, status_code=302)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name in PLUGIN_FILES:

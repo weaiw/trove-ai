@@ -113,12 +113,8 @@ export default function ObsidianBackup() {
   };
 
   const handleDownloadPlugin = () => {
-    const a = document.createElement('a');
-    a.href = '/api/sync/plugin-download';
-    a.download = 'trove-sync-obsidian-plugin.zip';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    // 插件从其独立仓的 GitHub Releases 分发(本仓不打包构建产物)
+    window.open('https://github.com/weaiw/trove-sync-obsidian/releases/latest', '_blank', 'noopener');
   };
 
   return (
@@ -154,12 +150,12 @@ export default function ObsidianBackup() {
             className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-[var(--border-color)] hover:bg-[var(--bg-tertiary)]"
           >
             <Download size={14} />
-            下载插件
+            前往插件 Releases
           </button>
-          <span className="ml-2 text-xs text-[var(--text-tertiary)]">trove-sync-obsidian-plugin.zip</span>
+          <span className="ml-2 text-xs text-[var(--text-tertiary)]">下载最新版的 main.js / manifest.json / styles.css</span>
         </li>
         <li className="leading-7">
-          把 zip 解压到你的 Obsidian vault 目录下的&nbsp;
+          把这三个文件放到你的 Obsidian vault 目录下的&nbsp;
           <code className="px-1.5 py-0.5 rounded bg-[var(--bg-secondary)] text-xs">.obsidian/plugins/trove-sync/</code>
         </li>
         <li className="leading-7">
