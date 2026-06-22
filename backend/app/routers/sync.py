@@ -74,6 +74,20 @@ class SyncArticlesResponse(BaseModel):
     server_time: str
 
 
+class SyncUpdateRequest(BaseModel):
+    """Obsidian 插件回写本地编辑(双向同步)。"""
+    title: Optional[str] = None
+    clean_content: Optional[str] = None
+    base_updated_at: Optional[datetime] = None  # 上次拉取看到的 server updated_at,冲突检测用
+
+
+class SyncUpdateResponse(BaseModel):
+    id: str
+    updated_at: str
+    changed: bool = False
+    reembedded: bool = False
+
+
 class SyncStatsResponse(BaseModel):
     total_articles: int
     eligible_articles: int  # AI-processed, sync-ready
@@ -257,6 +271,75 @@ async def list_sync_articles(
         articles=out,
         next_cursor=next_cursor,
         server_time=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.patch("/articles/{article_id}", response_model=SyncUpdateResponse)
+async def update_sync_article(
+    article_id: str,
+    body: SyncUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """回写 Obsidian 本地编辑(双向同步)。冲突=LWW+时间戳护栏:插件给 base_updated_at,
+    若服务端 updated_at 已更新(>2s)→ 409 不覆盖。改 clean_content 会重算 embedding。"""
+    from datetime import timedelta
+    try:
+        aid = UUID(article_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid article id")
+
+    article = await db.get(Article, aid)
+    if not article or article.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    if body.base_updated_at and article.updated_at:
+        srv = article.updated_at
+        base = body.base_updated_at
+        if srv.tzinfo is None:
+            srv = srv.replace(tzinfo=timezone.utc)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        if srv > base + timedelta(seconds=2):
+            raise HTTPException(
+                status_code=409,
+                detail=f"conflict: server newer than base ({srv.isoformat()})",
+            )
+
+    changed = False
+    reembedded = False
+    if body.title is not None:
+        new_title = body.title.strip()
+        if new_title and new_title != article.title:
+            article.title = new_title[:500]
+            changed = True
+    if body.clean_content is not None and body.clean_content != (article.clean_content or ""):
+        article.clean_content = body.clean_content
+        article.plain_text = body.clean_content
+        from app.services.parser_service import parser_service
+        article.word_count = parser_service.count_words(body.clean_content)
+        if article.content_type == "note":
+            article.raw_content = body.clean_content
+        changed = True
+        try:
+            from app.services.ai_service import llm_service
+            emb = await llm_service.get_embedding(
+                f"{article.title}. {article.summary or ''}. {body.clean_content[:2000]}"
+            )
+            article.embedding = emb
+            reembedded = True
+        except Exception as e:
+            logger.warning(f"re-embed after sync writeback failed for {aid}: {e}")
+
+    if changed:
+        await db.commit()
+        await db.refresh(article)
+
+    return SyncUpdateResponse(
+        id=str(article.id),
+        updated_at=article.updated_at.isoformat() if article.updated_at else "",
+        changed=changed,
+        reembedded=reembedded,
     )
 
 

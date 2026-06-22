@@ -80,6 +80,53 @@ export interface GraphData {
   edges: KnowledgeEdge[];
 }
 
+export interface InsightRef { id: string; title: string; }
+export interface SurprisingLink {
+  source: InsightRef;
+  target: InsightRef;
+  score: number;
+  cross_community: boolean;
+}
+export interface GraphCommunity { id: number; label: string; size: number; sample_titles: string[]; }
+export interface GraphHub { id: string; title: string; degree: number; weighted_degree: number; }
+export interface GraphInsights {
+  empty: boolean;
+  stats: { articles: number; edges: number; communities: number; orphans: number };
+  communities: GraphCommunity[];
+  hubs: GraphHub[];
+  surprising_links: SurprisingLink[];
+  gaps: {
+    orphans: InsightRef[];
+    orphan_count: number;
+    small_topics: { label: string; size: number; sample_titles: string[] }[];
+  };
+}
+
+export interface ConceptSummary {
+  id: string;
+  name: string;
+  seed_type: string;
+  seed_tag?: string | null;
+  source_count: number;
+  stale: boolean;
+  new_source_count: number;
+  auto_update: boolean;
+  updated_at: string;
+}
+export interface ConceptDetail extends ConceptSummary {
+  content: string;
+  sources: { id: string; title: string }[];
+}
+export interface ConceptSuggestion { tag: string; article_count: number; has_page: boolean; }
+export interface ConceptCluster { label: string; article_ids: string[]; sample_titles: string[]; size: number; }
+export interface ConceptAnalyze {
+  coherent?: boolean;
+  needs_split?: boolean;
+  source_count?: number;
+  sources?: { id: string; title: string }[];
+  clusters?: ConceptCluster[];
+}
+
 export interface LearningPath {
   id: string;
   title: string;
@@ -178,6 +225,7 @@ export interface User {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  kb_purpose?: string | null;
 }
 
 export interface LoginResponse {

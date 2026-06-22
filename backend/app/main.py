@@ -10,7 +10,7 @@ import httpx
 
 from app.config import get_settings
 from app.database import init_db
-from .routers import articles, knowledge, learning, system, assistant, auth, users, wechat, review, research, sync
+from .routers import articles, knowledge, learning, system, assistant, auth, users, wechat, review, research, sync, mcp, concepts
 
 settings = get_settings()
 logger = logging.getLogger("trove.auto_backfill")
@@ -144,6 +144,12 @@ app.include_router(research.router)
 
 # Obsidian sync API (Obsidian plugin pulls articles to local vault)
 app.include_router(sync.router)
+
+# MCP server — expose knowledge base to external AI agents
+app.include_router(mcp.router)
+
+# Concept synthesis pages
+app.include_router(concepts.router)
 
 # Allowed image proxy domains (anti-SSRF protection)
 ALLOWED_IMAGE_DOMAINS = {

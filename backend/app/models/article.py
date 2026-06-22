@@ -36,6 +36,7 @@ class Article(Base):
     published_at = Column(DateTime(timezone=True))
     
     raw_content = Column(Text)  # original HTML
+    content_hash = Column(String(64), index=True)  # SHA256 of fetched raw_content; dedup same-content-different-URL
     clean_content = Column(Text)  # cleaned markdown
     plain_text = Column(Text)  # plain text for search
     embedding = Column(Vector(1024))  # SiliconFlow BAAI/bge-m3 (1024-dim) for semantic search
@@ -66,9 +67,13 @@ class Article(Base):
 
 class Tag(Base):
     __tablename__ = 'tags'
-    
+    __table_args__ = (
+        # 标签按用户隔离:唯一性是 (user_id, name),不再全局唯一。
+        UniqueConstraint('user_id', 'name', name='uq_tags_user_name'),
+    )
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name = Column(String(100), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
     color = Column(String(7), default='#007aff')  # hex color
     is_ai_generated = Column(Boolean, default=True)
     description = Column(String(500))
@@ -110,6 +115,30 @@ class KnowledgeEdge(Base):
     
     source = relationship('Article', foreign_keys=[source_article_id], lazy='selectin')
     target = relationship('Article', foreign_keys=[target_article_id], lazy='selectin')
+
+class ConceptPage(Base):
+    """概念合成页:把同一概念跨多篇文章合成一页带溯源的"活百科"。
+    sources(articles,不可变)→ wiki(本表,LLM 生成)。来源=语义聚合后的连贯文章集。"""
+    __tablename__ = 'concept_pages'
+    __table_args__ = (
+        UniqueConstraint('user_id', 'name', name='uq_concept_user_name'),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    seed_type = Column(String(20), default='topic')         # 'tag' | 'topic'
+    seed_tag = Column(String(100))
+    content = Column(Text)
+    source_article_ids = Column(JSONB, default=list)
+    centroid = Column(Vector(1024))                         # 来源 embedding 质心(语义 stale 判定)
+    stale = Column(Boolean, default=False)
+    new_source_count = Column(Integer, default=0)
+    auto_update = Column(Boolean, default=False)            # 命中新来源时后台自动重合成
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
 
 class LearningPath(Base):
     __tablename__ = 'learning_paths'

@@ -1,5 +1,5 @@
 """User model for authentication and data isolation."""
-from sqlalchemy import Column, String, Boolean, DateTime, Integer
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 import uuid
@@ -20,6 +20,9 @@ class User(Base):
     # if it doesn't match the current value. Does NOT affect 24h login JWTs
     # (those have purpose=None and skip the check).
     sync_token_version = Column(Integer, nullable=False, default=0, server_default='0')
+
+    # 知识库定位/用途(用户自述)。注入到 RAG 问答与深度研究的 system prompt。
+    kb_purpose = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

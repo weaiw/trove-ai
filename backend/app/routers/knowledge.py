@@ -22,15 +22,25 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
 
 # ---- Tags ----
+async def _resolve_target_user_id(db: AsyncSession, current_user: User, username_query: Optional[str]) -> UUID:
+    """超管默认只看自己;传 ?username= 才查指定用户(与文章/图谱一致)。普通用户恒为自己。"""
+    if current_user.is_super_admin and username_query:
+        ur = await db.execute(select(User).where(User.username == username_query))
+        tu = ur.scalar_one_or_none()
+        if tu:
+            return tu.id
+    return current_user.id
+
+
 @router.get("/tags", response_model=List[TagResponse])
 async def list_tags(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    username_query: Optional[str] = Query(None, alias="username", description="Superadmin: filter by username"),
 ):
-    """List all tags."""
-    query = select(Tag).order_by(Tag.name)
-    if not current_user.is_super_admin:
-        query = query.where(Tag.user_id == current_user.id)
+    """List tags(默认只看自己;超管可 ?username= 看指定用户)。"""
+    target_user_id = await _resolve_target_user_id(db, current_user, username_query)
+    query = select(Tag).where(Tag.user_id == target_user_id).order_by(Tag.name)
     result = await db.execute(query)
     return result.scalars().all()
 
@@ -42,13 +52,16 @@ async def create_tag(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new tag."""
+    """Create a new tag(按用户隔离:同名仅在本用户内查重)。"""
     existing = await db.execute(
-        select(Tag).where(func.lower(Tag.name) == name.lower())
+        select(Tag).where(
+            func.lower(Tag.name) == name.lower(),
+            Tag.user_id == current_user.id,
+        )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Tag already exists")
-    
+
     tag = Tag(name=name, color=color, is_ai_generated=False, user_id=current_user.id)
     db.add(tag)
     await db.commit()
@@ -88,19 +101,24 @@ async def update_tag(
 async def get_tag_stats(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    username_query: Optional[str] = Query(None, alias="username", description="Superadmin: filter by username"),
 ):
-    """Get all tags with article counts."""
+    """Tags with article counts(默认只看自己;超管可 ?username=)。计数只统计目标用户自己的文章。"""
+    target_user_id = await _resolve_target_user_id(db, current_user, username_query)
     query = (
         select(
             Tag,
-            func.count(article_tags.c.article_id).label("article_count"),
+            func.count(Article.id).label("article_count"),
         )
         .outerjoin(article_tags, Tag.id == article_tags.c.tag_id)
+        .outerjoin(
+            Article,
+            (Article.id == article_tags.c.article_id) & (Article.user_id == target_user_id),
+        )
+        .where(Tag.user_id == target_user_id)
         .group_by(Tag.id)
         .order_by(Tag.name)
     )
-    if not current_user.is_super_admin:
-        query = query.where(Tag.user_id == current_user.id)
     result = await db.execute(query)
     rows = result.all()
     return [
@@ -220,14 +238,15 @@ async def list_folders(
     parent_id: Optional[UUID] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    username_query: Optional[str] = Query(None, alias="username", description="Superadmin: filter by username"),
 ):
-    """List folders. If parent_id is None, return root-level folders."""
+    """List folders(默认只看自己;超管可 ?username= 看指定用户)。"""
+    target_user_id = await _resolve_target_user_id(db, current_user, username_query)
     if parent_id:
         query = select(Folder).where(Folder.parent_id == parent_id).order_by(Folder.name)
     else:
         query = select(Folder).where(Folder.parent_id.is_(None)).order_by(Folder.name)
-    if not current_user.is_super_admin:
-        query = query.where(Folder.user_id == current_user.id)
+    query = query.where(Folder.user_id == target_user_id)
     result = await db.execute(query)
     return result.scalars().all()
 
@@ -367,6 +386,22 @@ async def get_graph(
             })
 
     return {"nodes": nodes, "edges": edge_data}
+
+
+@router.get("/insights")
+async def get_insights(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    username_query: str | None = Query(None, alias="username", description="Superadmin: filter by username"),
+):
+    """Graph Insights:社区聚类 / 枢纽 / 意外连接 / 知识缺口(Louvain + Adamic-Adar)。"""
+    from app.services.graph_insights import compute_insights
+    target_user_id = current_user.id
+    if current_user.is_super_admin and username_query:
+        user_result = await db.execute(select(User).where(User.username == username_query))
+        target_user = user_result.scalar_one_or_none()
+        target_user_id = target_user.id if target_user else current_user.id
+    return await compute_insights(db, target_user_id)
 
 
 async def _regenerate_graph_background(target_user_id: UUID):

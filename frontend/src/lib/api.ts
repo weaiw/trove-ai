@@ -1,5 +1,5 @@
 // Trove AI API Client — direct backend (bypass Next.js proxy)
-import type { Article, ArticleDetail, ArticleListResponse, Tag, TagWithCount, Folder, GraphData, LearningPath, LearningPathDetail, Stats, SparkResponse, RelatedArticlesResponse, AskResponse, MindMapData, MindMapResponse, User } from './types';
+import type { Article, ArticleDetail, ArticleListResponse, Tag, TagWithCount, Folder, GraphData, GraphInsights, ConceptSummary, ConceptDetail, ConceptSuggestion, ConceptAnalyze, LearningPath, LearningPathDetail, Stats, SparkResponse, RelatedArticlesResponse, AskResponse, MindMapData, MindMapResponse, User } from './types';
 
 const API_BASE = '';
 
@@ -66,6 +66,50 @@ class ApiClient {
 
   async getMe(): Promise<User> {
     return this.request<User>('/api/auth/me');
+  }
+
+  async setKbPurpose(kbPurpose: string): Promise<{ kb_purpose: string }> {
+    return this.request<{ kb_purpose: string }>('/api/auth/kb-purpose', {
+      method: 'PUT',
+      body: JSON.stringify({ kb_purpose: kbPurpose }),
+    });
+  }
+
+  async getInsights(username?: string): Promise<GraphInsights> {
+    const q = username ? `?username=${encodeURIComponent(username)}` : '';
+    return this.request<GraphInsights>(`/api/knowledge/insights${q}`);
+  }
+
+  // ── Concept pages ──
+  async listConcepts(): Promise<ConceptSummary[]> {
+    return this.request<ConceptSummary[]>('/api/concepts');
+  }
+  async conceptSuggestions(): Promise<ConceptSuggestion[]> {
+    return this.request<ConceptSuggestion[]>('/api/concepts/suggestions');
+  }
+  async analyzeConcept(name: string, tag?: string): Promise<ConceptAnalyze> {
+    return this.request<ConceptAnalyze>('/api/concepts/analyze', {
+      method: 'POST',
+      body: JSON.stringify({ name, tag: tag ?? null }),
+    });
+  }
+  async createConcept(body: { name: string; seed_type: string; seed_tag?: string | null; article_ids?: string[] | null }): Promise<ConceptDetail> {
+    return this.request<ConceptDetail>('/api/concepts', { method: 'POST', body: JSON.stringify(body) });
+  }
+  async getConcept(id: string): Promise<ConceptDetail> {
+    return this.request<ConceptDetail>(`/api/concepts/${id}`);
+  }
+  async regenerateConcept(id: string): Promise<ConceptDetail> {
+    return this.request<ConceptDetail>(`/api/concepts/${id}/regenerate`, { method: 'POST' });
+  }
+  async setConceptAutoUpdate(id: string, enabled: boolean): Promise<ConceptDetail> {
+    return this.request<ConceptDetail>(`/api/concepts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ auto_update: enabled }),
+    });
+  }
+  async deleteConcept(id: string): Promise<void> {
+    return this.request<void>(`/api/concepts/${id}`, { method: 'DELETE' });
   }
 
   async changePassword(currentPassword: string, newPassword: string): Promise<{ message: string }> {

@@ -29,14 +29,14 @@ async def _sse_stream(gen) -> AsyncIterator[bytes]:
         yield f"data: {payload}\n\n".encode("utf-8")
 
 
-async def _wrap(query: str, user_id, mode: str) -> AsyncIterator[bytes]:
+async def _wrap(query: str, user_id, mode: str, kb_purpose: str = "") -> AsyncIterator[bytes]:
     """Open a fresh DB session bound to the stream, run the agent, stream events."""
     async with async_session() as db:
         if mode == "tool":
             async for ev in run_tool_agent(db, query, user_id):
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
         else:
-            async for ev in run_research(db, query, user_id):
+            async for ev in run_research(db, query, user_id, kb_purpose=kb_purpose):
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
@@ -47,7 +47,7 @@ async def research_ask(
 ):
     """4-stage sequential research (plan → retrieve → synthesize → critique)."""
     return StreamingResponse(
-        _wrap(body.query, current_user.id, mode="sequential"),
+        _wrap(body.query, current_user.id, mode="sequential", kb_purpose=current_user.kb_purpose or ""),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -5,10 +5,11 @@ import dynamic from 'next/dynamic';
 import { useSearchParams } from 'next/navigation';
 import {
   RefreshCw, Search, Filter, GitGraph, ExternalLink, Loader2,
-  Box, Square, Focus, Star, X, ChevronDown,
+  Box, Square, Focus, Star, X, ChevronDown, Sparkles,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import type { GraphData, GraphNode, KnowledgeEdge } from '@/lib/types';
+import InsightsPanel from '@/components/InsightsPanel';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false });
 const ForceGraph3D = dynamic(() => import('react-force-graph-3d'), { ssr: false });
@@ -56,6 +57,7 @@ export default function GraphPage() {
   const [showFilters, setShowFilters] = useState(false);
   const [tagFilter, setTagFilter] = useState<Set<string>>(new Set());
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [showInsights, setShowInsights] = useState(false);
 
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -397,6 +399,14 @@ export default function GraphPage() {
           </button>
 
           <button
+            onClick={() => setShowInsights(true)}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs bg-[#f5f5f7] text-[#6e6e73] rounded-lg hover:bg-[#ebebf0] transition-colors"
+            title="社区聚类 / 意外连接 / 知识缺口"
+          >
+            <Sparkles size={12} /> 洞察
+          </button>
+
+          <button
             onClick={regenerate}
             className="flex items-center gap-1.5 px-3 py-2 text-xs bg-[#007aff] text-white rounded-lg hover:bg-[#0062cc] transition-colors"
           >
@@ -404,6 +414,14 @@ export default function GraphPage() {
           </button>
         </div>
       </div>
+
+      {showInsights && (
+        <InsightsPanel
+          username={viewUsername || undefined}
+          onClose={() => setShowInsights(false)}
+          onNavigate={(id) => { window.location.href = `/read/${id}`; }}
+        />
+      )}
 
       {/* Filter panel */}
       {showFilters && (

@@ -1,4 +1,5 @@
 """Authentication router — login, current user, change password."""
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +34,7 @@ class UserInfo(BaseModel):
     is_super_admin: bool
     is_active: bool
     created_at: str
+    kb_purpose: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -41,6 +43,10 @@ class UserInfo(BaseModel):
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str = Field(..., min_length=6, max_length=100)
+
+
+class KbPurposeRequest(BaseModel):
+    kb_purpose: str = Field(default="", max_length=2000)
 
 
 # ── Routes ──────────────────────────────────────────────────
@@ -88,7 +94,20 @@ async def get_me(current_user: User = Depends(get_current_user)):
         is_super_admin=current_user.is_super_admin,
         is_active=current_user.is_active,
         created_at=str(current_user.created_at) if current_user.created_at else "",
+        kb_purpose=current_user.kb_purpose,
     )
+
+
+@router.put("/kb-purpose")
+async def set_kb_purpose(
+    body: KbPurposeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """设置当前用户的知识库定位/用途(注入到 RAG 问答与深度研究)。空串=清除。"""
+    current_user.kb_purpose = body.kb_purpose.strip() or None
+    await db.commit()
+    return {"kb_purpose": current_user.kb_purpose or ""}
 
 
 @router.post("/change-password")

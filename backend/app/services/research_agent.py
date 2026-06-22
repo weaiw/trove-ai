@@ -79,8 +79,9 @@ async def _semantic_search(
 
 
 # ── Stage prompts ──────────────────────────────────────────────────────
-async def _plan(query: str) -> List[str]:
+async def _plan(query: str, kb_purpose: str = "") -> List[str]:
     """Decompose the user's question into 2-5 sub-questions."""
+    from app.services.kb_purpose import purpose_clause
     prompt = f"""你是研究助理。用户提出一个问题，请把它拆成 2-5 个可以独立去知识库检索的子问题。
 子问题之间应**互补**（覆盖不同侧面、时间、对比维度），不要重复。
 
@@ -92,7 +93,7 @@ async def _plan(query: str) -> List[str]:
   "sub_questions": ["子问题 1", "子问题 2", ...]
 }}"""
     raw = await llm_service._chat(
-        [{"role": "system", "content": "你是严谨的研究规划助手。"},
+        [{"role": "system", "content": "你是严谨的研究规划助手。" + purpose_clause(kb_purpose)},
          {"role": "user", "content": prompt}],
         temperature=0.3,
     )
@@ -104,8 +105,9 @@ async def _plan(query: str) -> List[str]:
     return subs[:MAX_SUB_QUESTIONS]
 
 
-async def _synthesize(query: str, evidence: List[Dict]) -> str:
+async def _synthesize(query: str, evidence: List[Dict], kb_purpose: str = "") -> str:
     """Write a structured answer from gathered evidence."""
+    from app.services.kb_purpose import purpose_clause
     blocks = []
     cite_idx = 0
     cite_map = []  # (idx, title, article_id)
@@ -132,7 +134,7 @@ async def _synthesize(query: str, evidence: List[Dict]) -> str:
 
 请回答："""
     answer = await llm_service._chat(
-        [{"role": "system", "content": "你是基于证据写作的研究助理。"},
+        [{"role": "system", "content": "你是基于证据写作的研究助理。" + purpose_clause(kb_purpose)},
          {"role": "user", "content": prompt}],
         temperature=0.4,
     )
@@ -167,12 +169,13 @@ async def run_research(
     db: AsyncSession,
     query: str,
     user_id: UUID,
+    kb_purpose: str = "",
 ) -> AsyncIterator[ResearchEvent]:
     """Yield progress events through the full research pipeline."""
     try:
         # Stage 1: Plan
         yield _emit("plan", "正在拆解问题…")
-        sub_questions = await _plan(query)
+        sub_questions = await _plan(query, kb_purpose)
         yield _emit("plan", f"拆出 {len(sub_questions)} 个子问题：" +
                     "、".join(f"「{s[:18]}」" for s in sub_questions[:3]))
 
@@ -210,9 +213,27 @@ async def run_research(
             ),
         )
 
+        # Stage 2.5: 图扩展——沿知识图谱边补充强关联文章
+        try:
+            from app.services.graph_retrieval import expand_via_graph
+            extra = await expand_via_graph(db, list(seen_ids), user_id, max_extra=3)
+            extra = [e for e in extra if e["article_id"] not in seen_ids]
+            if extra:
+                evidence.append({"question": "图谱关联", "articles": [
+                    {"article_id": e["article_id"], "title": e["title"],
+                     "chunk": e["chunk"], "distance": 0.0}
+                    for e in extra
+                ]})
+                for e in extra:
+                    seen_ids.add(e["article_id"])
+                unique_total = len(seen_ids)
+                yield _emit("retrieve", f"图谱补充 {len(extra)} 篇强关联文章")
+        except Exception as ex:
+            logger.warning(f"graph expansion failed: {ex}")
+
         # Stage 3: Synthesize
         yield _emit("synthesize", "正在综合写作…")
-        synthesis = await _synthesize(query, evidence)
+        synthesis = await _synthesize(query, evidence, kb_purpose)
         yield _emit("synthesize", "初稿完成")
 
         # Stage 4: Critique

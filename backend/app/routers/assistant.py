@@ -117,7 +117,9 @@ async def _answer_single_article(req: AskRequest, session: AsyncSession, current
 
 请回答："""
 
-    answer = await _call_llm(prompt, "你是一个阅读助手，严格基于用户当前正在阅读的这篇文章作答。")
+    from app.services.kb_purpose import purpose_clause
+    system = "你是一个阅读助手，严格基于用户当前正在阅读的这篇文章作答。" + purpose_clause(current_user.kb_purpose)
+    answer = await _call_llm(prompt, system)
     citations = [Citation(
         article_id=str(article_id),
         title=title or "Untitled",
@@ -160,9 +162,11 @@ async def ask(req: AskRequest, session: AsyncSession = Depends(get_db), current_
     # Step 3: Extract relevant chunks from each article
     citations = []
     context_parts = []
-    
+    seed_ids = []
+
     for row in rows:
         article_id, title, clean_content, raw_content, distance = row
+        seed_ids.append(str(article_id))
         content = clean_content or raw_content or ""
 
         # Split into paragraphs
@@ -186,6 +190,27 @@ async def ask(req: AskRequest, session: AsyncSession = Depends(get_db), current_
         
         context_parts.append(f"--- 文章: {title} ---\n{chunk}")
 
+    # Step 3.5: 图扩展——沿知识图谱边把强关联邻居也拉进上下文
+    REL_LABEL = {"related": "相关", "prerequisite": "前置", "extends": "延伸", "contradicts": "对立观点"}
+    try:
+        from app.services.graph_retrieval import expand_via_graph
+        neighbors = await expand_via_graph(session, seed_ids, current_user.id, max_extra=3)
+        for nb in neighbors:
+            rel = REL_LABEL.get(nb["relation_type"], "关联")
+            chunk = nb["chunk"]
+            if len(chunk) > 2000:
+                chunk = chunk[:2000] + "..."
+            citations.append(Citation(
+                article_id=nb["article_id"],
+                title=nb["title"],
+                chunk=chunk,
+                relevance_score=round(float(nb["weight"]), 4),
+            ))
+            context_parts.append(f"--- 关联文章（{rel}）: {nb['title']} ---\n{chunk}")
+    except Exception as e:
+        import logging
+        logging.getLogger("trove.assistant").warning(f"graph expand failed: {e}")
+
     # Step 4: Build prompt
     context_text = "\n\n".join(context_parts)
     
@@ -206,6 +231,8 @@ async def ask(req: AskRequest, session: AsyncSession = Depends(get_db), current_
 请回答（并在末尾列出引用来源）："""
 
     # Step 5: Call LLM
-    answer = await _call_llm(prompt, "你是一个专业的知识库AI助手，基于知识库内容准确回答问题。")
+    from app.services.kb_purpose import purpose_clause
+    system = "你是一个专业的知识库AI助手，基于知识库内容准确回答问题。" + purpose_clause(current_user.kb_purpose)
+    answer = await _call_llm(prompt, system)
 
     return AskResponse(answer=answer, citations=citations)

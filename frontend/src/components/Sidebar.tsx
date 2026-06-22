@@ -5,8 +5,8 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard, BookOpen, GitGraph, Route,
-  Search, Settings, X, Sun, Moon, Menu, Sparkles,
-  Users, LogOut
+  Search, Settings, X, Sun, Moon, Menu,
+  Users, LogOut, Library
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useTheme } from '@/components/ThemeProvider';
@@ -15,8 +15,8 @@ import { useAuth } from '@/contexts/AuthContext';
 const commonNavItems = [
   { href: '/', label: '仪表盘', icon: LayoutDashboard },
   { href: '/library', label: '知识库', icon: BookOpen },
-  { href: '/spark', label: '灵感创作', icon: Sparkles },
   { href: '/graph', label: '知识图谱', icon: GitGraph },
+  { href: '/concepts', label: '概念词条', icon: Library },
   { href: '/paths', label: '学习路线', icon: Route },
   { href: '/my', label: '个人设置', icon: Settings },
 ];

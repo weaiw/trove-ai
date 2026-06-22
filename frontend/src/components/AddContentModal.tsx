@@ -30,6 +30,7 @@ function detectPlatform(url: string): string {
   if (url.includes('csdn.net')) return 'csdn';
   if (url.includes('medium.com')) return 'medium';
   if (url.includes('juejin.cn')) return 'juejin';
+  if (url.includes('github.com')) return 'github';
   return 'other';
 }
 

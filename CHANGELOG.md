@@ -2,6 +2,32 @@
 
 All notable changes to Trove AI are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-06-22
+
+A large feature drop inspired by the "LLM Wiki" pattern: turn the library from per-article storage into an interconnected, synthesizable knowledge base — plus stronger multi-tenant isolation.
+
+### Added
+- **🧩 Concept pages** — synthesize everything you saved about one concept into a single cited "living encyclopedia entry." Sources are gathered by *semantic coherence* (not raw tag membership); broad/heterogeneous tags are auto-split into focused sub-concepts via embedding clustering (networkx + Louvain). Contradictions between sources surface in a dedicated section. New endpoints under `/api/concepts`, new pages at `/concepts`.
+  - Per-page **auto-update** toggle: when new relevant content arrives, either just flag the page stale (default) or auto-regenerate it. A semantic *centroid* per page powers "new relevant content" detection for all page types.
+- **🕸️ Graph Insights** — community detection (Louvain), hubs/centrality, "surprising connections" (Adamic-Adar link prediction: pages that *should* be linked but aren't), and knowledge gaps (orphan articles). New `/api/knowledge/insights` + an insights panel on the graph page; a one-line insight is also appended to the periodic WeChat review digest.
+- **🔗 Graph-augmented retrieval** — RAG and deep-research expand from vector hits along the knowledge graph, pulling in explicitly-related articles (incl. `contradicts`/`prerequisite`) that pure similarity misses.
+- **🎯 Knowledge-base purpose** — describe what your library is for; it's injected into Q&A and research prompts so answers match your domain's framing.
+- **⚖️ Contradiction detection on ingest** — new articles are checked against existing knowledge for opposing views; conflicts create a `contradicts` edge and (if bound) a WeChat heads-up.
+- **🐙 GitHub repo capture** — `github.com/owner/repo` links fetch README + metadata (stars/forks/language/topics) via the REST API.
+- **🔄 Obsidian two-way sync** — new `PATCH /api/sync/articles/{id}` writeback endpoint with last-write-wins + timestamp-guard conflict detection; editing a synced note's body/title flows back to the server (re-embeds on content change). (Companion plugin update ships separately.)
+- **🔌 MCP server** — `POST /api/mcp` (Streamable-HTTP, Bearer auth) exposes the knowledge base to external AI agents: search_knowledge / get_article / knowledge_insights / list_recent_articles.
+- **♻️ Content de-duplication** — articles carry a SHA256 `content_hash` so the same content saved via different URLs is detected.
+
+### Changed / Fixed
+- **Multi-tenant isolation hardening** — folders, tags, and tag stats default to the current user even for superadmins (use `?username=` to view another user); tags are isolated per user (`UNIQUE(user_id, name)` instead of global); graph generation only compares a user's own articles (no cross-user content reaching the LLM).
+- Removed the standalone **Spark** page from the nav (inspiration writing still lives in the "Add content" dialog).
+
+### Dependencies
+- Added `networkx>=3.2,<4` and `python-louvain>=0.16`.
+
+### Migrations
+- `008`–`011`: `users.kb_purpose`, `articles.content_hash`, per-user tag uniqueness, and the `concept_pages` table (+ `centroid` / `auto_update`).
+
 ## [1.1.0] — 2026-05-31
 
 ### Added

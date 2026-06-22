@@ -1,5 +1,6 @@
 """Article management API routes."""
 import os
+import hashlib
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, BackgroundTasks, Body
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,118 @@ router = APIRouter(prefix="/api/articles", tags=["articles"])
 
 PROACTIVE_DISTANCE_THRESHOLD = 0.45  # bge-m3 cosine distance; lower = closer match
 PROACTIVE_PUBLIC_BASE = os.getenv("TROVE_PUBLIC_BASE", "http://localhost")
+
+
+def _content_hash(raw: Optional[str]) -> Optional[str]:
+    """SHA256 of fetched raw_content (stripped). 去重「同内容不同链接」。空返回 None。"""
+    s = (raw or "").strip()
+    return hashlib.sha256(s.encode("utf-8")).hexdigest() if s else None
+
+
+async def _detect_contradictions_and_push(db, article_id) -> bool:
+    """两步入库 Step-2:把新文章对照已有知识找观点对立/事实冲突/结论矛盾,
+    建 contradicts 边并微信提醒。返回是否推送了冲突提醒(供调用方决定是否再发相似提醒)。"""
+    import logging
+    from sqlalchemy import text as sql_text
+    from app.models import WechatAccount
+    from app.services.ai_service import llm_service, _parse_llm_json
+    logger = logging.getLogger("trove.background")
+
+    article = await db.get(Article, article_id)
+    if not article or article.embedding is None or not (article.summary or article.title):
+        return False
+
+    emb_str = "[" + ",".join(str(v) for v in article.embedding) + "]"
+    rows = (await db.execute(sql_text(f"""
+        SELECT id, title, summary FROM articles
+        WHERE embedding IS NOT NULL AND user_id = :uid AND id != :aid
+        ORDER BY embedding <-> '{emb_str}'::vector
+        LIMIT 5
+    """), {"uid": article.user_id, "aid": article_id})).fetchall()
+    if not rows:
+        return False
+
+    candidates = [{"id": str(r[0]), "title": r[1] or "", "summary": (r[2] or "")[:200]} for r in rows]
+    cand_block = "\n".join(
+        f'{i+1}. [id={c["id"]}] {c["title"]} — {c["summary"]}' for i, c in enumerate(candidates)
+    )
+    prompt = f"""新文章：
+标题：{article.title}
+摘要：{article.summary or ''}
+要点：{article.key_points or []}
+
+已有相关文章：
+{cand_block}
+
+判断新文章是否与某些已有文章存在**观点对立 / 事实冲突 / 结论矛盾**（仅主题相似不算）。
+严格返回 JSON（不要 markdown 围栏）：{{"contradictions":[{{"id":"已有文章id","reason":"一句话冲突点"}}]}}
+确无矛盾就返回 {{"contradictions":[]}}。"""
+    try:
+        raw = await llm_service._chat(
+            [{"role": "system", "content": "你是严谨的知识库分析助手，只在确有矛盾时报告，宁缺毋滥。"},
+             {"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+    except Exception as e:
+        logger.warning(f"contradiction LLM failed for {article_id}: {e}")
+        return False
+
+    parsed = _parse_llm_json(raw) or {}
+    valid_ids = {c["id"] for c in candidates}
+    conflicts = [
+        c for c in (parsed.get("contradictions") or [])
+        if isinstance(c, dict) and c.get("id") in valid_ids
+    ][:3]
+    if not conflicts:
+        return False
+
+    id_title = {c["id"]: c["title"] for c in candidates}
+    for c in conflicts:
+        try:
+            tid = UUID(c["id"])
+        except (ValueError, TypeError):
+            continue
+        exists = await db.execute(
+            select(KnowledgeEdge).where(
+                KnowledgeEdge.source_article_id == article_id,
+                KnowledgeEdge.target_article_id == tid,
+            )
+        )
+        if exists.scalar_one_or_none():
+            continue
+        db.add(KnowledgeEdge(
+            source_article_id=article_id,
+            target_article_id=tid,
+            relation_type="contradicts",
+            relation_desc=(c.get("reason") or "")[:500],
+            weight=0.7,
+            user_id=article.user_id,
+        ))
+    await db.commit()
+
+    acct_r = await db.execute(
+        select(WechatAccount).where(
+            WechatAccount.user_id == article.user_id,
+            WechatAccount.is_active.is_(True),
+        )
+    )
+    acct = acct_r.scalar_one_or_none()
+    if not acct:
+        return False
+
+    first = conflicts[0]
+    deep_link = f"{PROACTIVE_PUBLIC_BASE}/read/{first['id']}"
+    msg = (
+        f"⚠️ 你新存的《{(article.title or '')[:30]}》跟之前的"
+        f"《{id_title.get(first['id'], '')[:30]}》观点可能冲突：\n"
+        f"{(first.get('reason') or '')[:60]}\n\n要不要打开对照看？{deep_link}"
+    )
+    import httpx
+    from app.services.review_service import send_wechat
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await send_wechat(client, acct, msg)
+    logger.info(f"contradiction: pushed to user={article.user_id} new={article_id} conflicts={len(conflicts)}")
+    return True
 
 
 async def _maybe_push_proactive_relation(db, article_id):
@@ -115,7 +228,10 @@ async def process_article_background(article_id: UUID, raw_content: str, raw_htm
             
             article.clean_content = clean_md
             article.plain_text = plain_text
-            
+            # 内容哈希(基于抓取到的 raw_content),供「同内容不同链接」去重。
+            if not article.content_hash:
+                article.content_hash = _content_hash(raw_content)
+
             # AI parse — pass raw_html for richer context when plain_text is thin
             ai_result = await llm_service.parse_article(plain_text, url, raw_html)
             
@@ -143,9 +259,12 @@ async def process_article_background(article_id: UUID, raw_content: str, raw_htm
             # Process tags
             ai_tags = ai_result.get('tags', [])
             for tag_name in ai_tags:
-                # Find or create tag
+                # Find or create tag — 按用户隔离:只在该用户自己的标签里找
                 result = await db.execute(
-                    select(Tag).where(func.lower(Tag.name) == tag_name.lower())
+                    select(Tag).where(
+                        func.lower(Tag.name) == tag_name.lower(),
+                        Tag.user_id == article.user_id,
+                    )
                 )
                 tag = result.scalar_one_or_none()
                 if not tag:
@@ -153,7 +272,7 @@ async def process_article_background(article_id: UUID, raw_content: str, raw_htm
                     db.add(tag)
                     await db.flush()
                 article.tags.append(tag)
-            
+
             await db.commit()
             
             # Generate knowledge graph connections
@@ -172,12 +291,21 @@ async def process_article_background(article_id: UUID, raw_content: str, raw_htm
             except Exception as embed_err:
                 logger.warning(f"Embedding generation error for {article_id}: {embed_err} (will be retried by auto-backfill)")
 
-            # Proactive: find a strongly-related earlier article and ping the user via bot.
-            # Cheap: one SQL similarity query + at most one WeChat sendmessage.
+            # 概念页 stale / auto-update(需 embedding,故放在向量生成之后)。
             try:
-                await _maybe_push_proactive_relation(db, article_id)
+                from app.services.concept_service import process_new_article
+                await process_new_article(db, article.user_id, article_id, ai_tags)
             except Exception as e:
-                logger.warning(f"proactive relation push failed for {article_id}: {e}")
+                logger.warning(f"concept hook failed for {article_id}: {e}")
+
+            # Step-2 KB-grounded 分析 + 主动推送:先矛盾检测(建 contradicts 边 + 冲突提醒),
+            # 有冲突推冲突、无冲突才退回普通相似提醒(择一,避免双推)。
+            try:
+                pushed = await _detect_contradictions_and_push(db, article_id)
+                if not pushed:
+                    await _maybe_push_proactive_relation(db, article_id)
+            except Exception as e:
+                logger.warning(f"proactive/contradiction push failed for {article_id}: {e}")
 
         except Exception as e:
             import traceback

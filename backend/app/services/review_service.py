@@ -264,8 +264,17 @@ async def _run_one_schedule(client: httpx.AsyncClient, sched: ReviewSchedule) ->
             logger.warning(f"user {sched.user_id} has no active wechat; no push but next_send_at already set")
             return
 
+        # 追加一条图谱洞察(Graph Insights):意外连接 / 知识缺口 / 枢纽。
+        insight_line = None
+        try:
+            from app.services.graph_insights import compute_insights, pick_digest_line
+            insight_line = pick_digest_line(await compute_insights(db, sched.user_id))
+        except Exception as e:
+            logger.warning(f"insight digest failed for {sched.user_id}: {e}")
+
         header = f"📚 Trove AI 知识回顾\n\n"
-        chunks = _split_for_wechat(header + text)
+        body = text + (f"\n\n{insight_line}" if insight_line else "")
+        chunks = _split_for_wechat(header + body)
         ok = True
         for chunk in chunks:
             if not await send_wechat(client, acct, chunk):

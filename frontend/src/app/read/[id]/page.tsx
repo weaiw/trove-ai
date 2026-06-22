@@ -60,6 +60,7 @@ const PLATFORM_STYLES: Record<string, string> = {
   wechat: 'bg-[#e8f8ed] text-[#07c160]',
   juejin: 'bg-[#e8f2ff] text-[#1e80ff]',
   medium: 'bg-[#f2f2f7] text-[#1d1d1f]',
+  github: 'bg-[#f2f2f7] text-[#1d1d1f]',
   default: 'bg-[#f2f2f7] text-[#6e6e73]',
 };
 
@@ -95,6 +96,7 @@ function getPlatformLabel(platform?: string): string {
     wechat: '微信公众号',
     juejin: '掘金',
     medium: 'Medium',
+    github: 'GitHub',
   };
   return map[platform.toLowerCase()] || platform;
 }

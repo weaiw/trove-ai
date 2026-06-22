@@ -30,3 +30,5 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.2.1
 json-repair>=0.30.0
 qrcode[pil]>=7.4.0
+networkx>=3.2,<4
+python-louvain>=0.16

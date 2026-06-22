@@ -77,24 +77,27 @@ class GraphService:
         share at least one tag with the new article. Falls back to keyword
         overlap when neither article has tags. Caps articles sent to AI at 20.
         """
-        # Get existing articles with summaries
+        # Get the new article first — we need its owner to scope candidates.
+        result = await db.execute(
+            select(Article).where(Article.id == article_id)
+        )
+        new_article = result.scalar_one_or_none()
+        if not new_article:
+            return
+
+        # Candidate articles MUST be scoped to the same user — otherwise edge
+        # generation would leak other users' summaries to the LLM and could
+        # create cross-user edges. Multi-tenant isolation.
         result = await db.execute(
             select(Article).where(
                 Article.id != article_id,
+                Article.user_id == new_article.user_id,
                 Article.summary.isnot(None),
             )
         )
         existing = result.scalars().all()
 
         if len(existing) < 2:
-            return
-
-        # Get the new article
-        result = await db.execute(
-            select(Article).where(Article.id == article_id)
-        )
-        new_article = result.scalar_one_or_none()
-        if not new_article:
             return
 
         # --- Filter existing articles by tag overlap (or keyword fallback) ---
