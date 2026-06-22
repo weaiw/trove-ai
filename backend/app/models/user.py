@@ -24,5 +24,8 @@ class User(Base):
     # 知识库定位/用途(用户自述)。注入到 RAG 问答与深度研究的 system prompt。
     kb_purpose = Column(Text, nullable=True)
 
+    # 是否允许 MCP 写入(新增/修改内容)。默认关:MCP 默认只读,开了才暴露写工具。
+    mcp_write_enabled = Column(Boolean, nullable=False, default=False, server_default='false')
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

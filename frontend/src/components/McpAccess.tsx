@@ -1,15 +1,38 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Plug, Copy, Check, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Plug, Copy, Check, ChevronDown, Loader2 } from 'lucide-react';
+import { api } from '@/lib/api';
 
 /**
  * 外部 AI 接入(MCP)说明卡片。放在个人设置(/my)。
  * MCP 复用同步 Token(上方「Obsidian 备份」生成的那个),不另设密钥。
+ * 写入默认关,开关控制是否暴露 add/update/set_tags 等写工具。
  */
 export default function McpAccess() {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string>('');
+  const [writeOn, setWriteOn] = useState<boolean | null>(null);
+  const [toggling, setToggling] = useState(false);
+
+  useEffect(() => {
+    api.getMe().then((u) => setWriteOn(!!u.mcp_write_enabled)).catch(() => setWriteOn(false));
+  }, []);
+
+  const toggleWrite = async () => {
+    if (writeOn === null) return;
+    const next = !writeOn;
+    setToggling(true);
+    setWriteOn(next); // optimistic
+    try {
+      const r = await api.setMcpWrite(next);
+      setWriteOn(r.mcp_write_enabled);
+    } catch {
+      setWriteOn(!next); // revert
+    } finally {
+      setToggling(false);
+    }
+  };
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://你的服务器';
   const endpoint = `${origin}/api/mcp`;
@@ -67,6 +90,27 @@ export default function McpAccess() {
         )}
       </div>
 
+      {/* 写入开关 */}
+      <div className="mb-3 p-3 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-color)]">
+        <label className="flex items-center justify-between cursor-pointer" onClick={() => !toggling && toggleWrite()}>
+          <div className="pr-3">
+            <div className="text-sm font-medium text-[var(--foreground)]">允许写入</div>
+            <div className="text-xs text-[var(--text-tertiary)] mt-0.5">
+              开启后 MCP 才暴露 add_article / add_note / update_article / set_article_tags 等写工具。默认关(只读),
+              因为这是对外 token 入口,谨慎开启。
+            </div>
+          </div>
+          <span
+            className={`relative inline-block w-10 h-6 rounded-full shrink-0 transition-colors ${
+              writeOn ? 'bg-[var(--accent)]' : 'bg-[var(--border-color)]'
+            } ${toggling ? 'opacity-60' : ''}`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${writeOn ? 'translate-x-4' : ''}`} />
+          </span>
+        </label>
+        {writeOn === null && <div className="text-[11px] text-[var(--text-tertiary)] mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> 读取设置…</div>}
+      </div>
+
       {/* 连接教程(可折叠) */}
       <button
         onClick={() => setOpen((v) => !v)}
@@ -106,12 +150,19 @@ export default function McpAccess() {
           </div>
 
           <div>
-            <div className="text-xs text-[var(--text-tertiary)] mb-1">可用工具</div>
+            <div className="text-xs text-[var(--text-tertiary)] mb-1">可用工具(读)</div>
             <ul className="text-xs text-[var(--text-secondary)] space-y-1 pl-4 list-disc">
               <li><code>search_knowledge</code> — 语义检索知识库</li>
               <li><code>get_article</code> — 按 id 读取整篇文章</li>
               <li><code>knowledge_insights</code> — 主题簇 / 枢纽 / 意外连接 / 知识缺口</li>
               <li><code>list_recent_articles</code> — 最近收藏列表</li>
+            </ul>
+            <div className="text-xs text-[var(--text-tertiary)] mt-2 mb-1">写工具{writeOn ? '(已开启)' : '(需打开上方「允许写入」)'}</div>
+            <ul className={`text-xs space-y-1 pl-4 list-disc ${writeOn ? 'text-[var(--text-secondary)]' : 'text-[var(--text-tertiary)] opacity-60'}`}>
+              <li><code>add_article</code> — 加链接进库</li>
+              <li><code>add_note</code> — 新建笔记</li>
+              <li><code>update_article</code> — 改标题/正文</li>
+              <li><code>set_article_tags</code> — 设标签</li>
             </ul>
           </div>
         </div>

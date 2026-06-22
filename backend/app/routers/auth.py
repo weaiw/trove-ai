@@ -35,6 +35,7 @@ class UserInfo(BaseModel):
     is_active: bool
     created_at: str
     kb_purpose: Optional[str] = None
+    mcp_write_enabled: bool = False
 
     class Config:
         from_attributes = True
@@ -47,6 +48,10 @@ class ChangePasswordRequest(BaseModel):
 
 class KbPurposeRequest(BaseModel):
     kb_purpose: str = Field(default="", max_length=2000)
+
+
+class McpWriteRequest(BaseModel):
+    enabled: bool
 
 
 # ── Routes ──────────────────────────────────────────────────
@@ -95,7 +100,20 @@ async def get_me(current_user: User = Depends(get_current_user)):
         is_active=current_user.is_active,
         created_at=str(current_user.created_at) if current_user.created_at else "",
         kb_purpose=current_user.kb_purpose,
+        mcp_write_enabled=bool(current_user.mcp_write_enabled),
     )
+
+
+@router.put("/mcp-write")
+async def set_mcp_write(
+    body: McpWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """开关 MCP 写入权限(默认关)。开了之后 MCP 才暴露 add/update/set_tags 等写工具。"""
+    current_user.mcp_write_enabled = body.enabled
+    await db.commit()
+    return {"mcp_write_enabled": current_user.mcp_write_enabled}
 
 
 @router.put("/kb-purpose")

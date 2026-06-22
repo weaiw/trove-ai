@@ -226,6 +226,7 @@ export interface User {
   created_at: string;
   updated_at: string;
   kb_purpose?: string | null;
+  mcp_write_enabled?: boolean;
 }
 
 export interface LoginResponse {

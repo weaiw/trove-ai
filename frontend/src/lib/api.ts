@@ -68,6 +68,13 @@ class ApiClient {
     return this.request<User>('/api/auth/me');
   }
 
+  async setMcpWrite(enabled: boolean): Promise<{ mcp_write_enabled: boolean }> {
+    return this.request<{ mcp_write_enabled: boolean }>('/api/auth/mcp-write', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
   async setKbPurpose(kbPurpose: string): Promise<{ kb_purpose: string }> {
     return this.request<{ kb_purpose: string }>('/api/auth/kb-purpose', {
       method: 'PUT',

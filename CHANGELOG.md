@@ -2,6 +2,11 @@
 
 All notable changes to Trove AI are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **MCP write tools (opt-in)** — the MCP server can now create/modify content, gated behind a per-user "allow write" switch (default **off**). When enabled it additionally exposes `add_article`, `add_note`, `update_article`, `set_article_tags`; read tools stay always-on. New `PUT /api/auth/mcp-write` toggle + a switch and live tool list in the settings "外部 AI 接入 (MCP)" card. Migration `012` (`users.mcp_write_enabled`).
+
 ## [1.2.0] — 2026-06-22
 
 A large feature drop inspired by the "LLM Wiki" pattern: turn the library from per-article storage into an interconnected, synthesizable knowledge base — plus stronger multi-tenant isolation.

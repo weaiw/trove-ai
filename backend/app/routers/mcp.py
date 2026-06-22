@@ -15,13 +15,13 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import text, select
+from sqlalchemy import text, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.models.article import Article
+from app.models.article import Article, Tag
 
 logger = logging.getLogger("trove.mcp")
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -30,7 +30,8 @@ SERVER_INFO = {"name": "Trove AI Knowledge Base", "version": "1.0.0"}
 DEFAULT_PROTOCOL = "2024-11-05"
 
 # ── Tool schemas (advertised via tools/list) ──────────────────────────────
-TOOLS = [
+# 读工具:始终可用。写工具:仅当 user.mcp_write_enabled 才暴露+可调。
+READ_TOOLS = [
     {
         "name": "search_knowledge",
         "description": "语义检索用户的知识库,返回最相关的文章(标题/摘要/相似度)。用于回答'我之前存过关于X的内容吗'这类问题。",
@@ -157,11 +158,191 @@ async def _tool_list_recent(db: AsyncSession, user: User, args: Dict) -> str:
     )
 
 
-_TOOL_FUNCS = {
+_READ_FUNCS = {
     "search_knowledge": _tool_search_knowledge,
     "get_article": _tool_get_article,
     "knowledge_insights": _tool_knowledge_insights,
     "list_recent_articles": _tool_list_recent,
+}
+
+
+# ── 写工具(需 user.mcp_write_enabled)─────────────────────────────────────
+WRITE_TOOLS = [
+    {
+        "name": "add_article",
+        "description": "把一个网页链接加入知识库(会后台跑完整 AI 处理:清洗/摘要/标签/向量/图谱)。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "要收藏的网页 URL"}},
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "add_note",
+        "description": "新建一条笔记(markdown 正文),同样会后台 AI 处理。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "笔记标题(可空)"},
+                "content": {"type": "string", "description": "markdown 正文"},
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "update_article",
+        "description": "修改某篇文章的标题/正文(改正文会重算向量)。先用 search_knowledge 拿 id。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "article_id": {"type": "string", "description": "文章 UUID"},
+                "title": {"type": "string", "description": "新标题(可选)"},
+                "content": {"type": "string", "description": "新正文 markdown(可选)"},
+            },
+            "required": ["article_id"],
+        },
+    },
+    {
+        "name": "set_article_tags",
+        "description": "设置某篇文章的标签(整组覆盖)。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "article_id": {"type": "string", "description": "文章 UUID"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "标签数组"},
+            },
+            "required": ["article_id", "tags"],
+        },
+    },
+]
+
+
+async def _tool_add_article(db: AsyncSession, user: User, args: Dict) -> str:
+    import asyncio
+    from app.services.parser_service import parser_service, extract_url_from_text
+    from app.routers.articles import process_article_background, _content_hash
+    url = (args.get("url") or "").strip()
+    clean_url = extract_url_from_text(url) or url
+    if not clean_url.startswith(("http://", "https://")):
+        return "请提供有效的网页 URL。"
+    exists = (await db.execute(
+        select(Article).where(Article.url == clean_url, Article.user_id == user.id)
+    )).scalar_one_or_none()
+    if exists:
+        return f"已存在:《{exists.title}》(id={exists.id})"
+    try:
+        content_data = await parser_service.fetch_content(clean_url)
+    except Exception as e:
+        return f"抓取失败:{type(e).__name__}: {str(e) or '(网络异常/被拦截)'}"
+    article = Article(
+        url=clean_url,
+        title=content_data.get("title") or "Untitled",
+        raw_content=content_data.get("raw_content"),
+        content_hash=_content_hash(content_data.get("raw_content")),
+        source_platform=content_data.get("platform"),
+        author=content_data.get("author"),
+        cover_image=content_data.get("cover_image"),
+        user_id=user.id,
+    )
+    db.add(article)
+    await db.commit()
+    await db.refresh(article)
+    asyncio.create_task(process_article_background(
+        article.id, content_data.get("raw_content"), content_data.get("raw_html", ""), clean_url, None,
+    ))
+    return f"已加入:《{article.title}》(id={article.id}),正在后台 AI 处理。"
+
+
+async def _tool_add_note(db: AsyncSession, user: User, args: Dict) -> str:
+    import asyncio
+    from app.routers.articles import process_article_background
+    content = (args.get("content") or "").strip()
+    if not content:
+        return "请提供 content。"
+    title = (args.get("title") or "").strip() or "Untitled"
+    article = Article(
+        title=title, url=None, content_type="note",
+        raw_content=content, clean_content=content, plain_text=content, user_id=user.id,
+    )
+    db.add(article)
+    await db.commit()
+    await db.refresh(article)
+    asyncio.create_task(process_article_background(
+        article.id, content, "", f"note://{article.id}", None,
+    ))
+    return f"已建笔记:《{title}》(id={article.id}),后台处理中。"
+
+
+async def _tool_update_article(db: AsyncSession, user: User, args: Dict) -> str:
+    from uuid import UUID
+    try:
+        aid = UUID(str(args.get("article_id")))
+    except (ValueError, TypeError):
+        return "无效 article_id。"
+    a = await db.get(Article, aid)
+    if not a or a.user_id != user.id:
+        return "未找到该文章(或无权访问)。"
+    changed = []
+    title = args.get("title")
+    if title and title.strip():
+        a.title = title.strip()[:500]
+        changed.append("标题")
+    content = args.get("content")
+    if content is not None and content != (a.clean_content or ""):
+        a.clean_content = content
+        a.plain_text = content
+        if a.content_type == "note":
+            a.raw_content = content
+        changed.append("正文")
+        try:
+            from app.services.ai_service import llm_service
+            a.embedding = await llm_service.get_embedding(
+                f"{a.title}. {a.summary or ''}. {content[:2000]}"
+            )
+        except Exception as e:
+            logger.warning(f"mcp update re-embed failed: {e}")
+    if changed:
+        await db.commit()
+        return f"已更新《{a.title}》的 {'/'.join(changed)}。"
+    return "无变化。"
+
+
+async def _tool_set_tags(db: AsyncSession, user: User, args: Dict) -> str:
+    from uuid import UUID
+    try:
+        aid = UUID(str(args.get("article_id")))
+    except (ValueError, TypeError):
+        return "无效 article_id。"
+    tags = args.get("tags")
+    if not isinstance(tags, list):
+        return "tags 需为字符串数组。"
+    a = await db.get(Article, aid)
+    if not a or a.user_id != user.id:
+        return "未找到该文章(或无权访问)。"
+    a.tags.clear()
+    applied = []
+    for tn in tags:
+        tn = str(tn).strip()
+        if not tn:
+            continue
+        t = (await db.execute(
+            select(Tag).where(func.lower(Tag.name) == tn.lower(), Tag.user_id == user.id)
+        )).scalar_one_or_none()
+        if not t:
+            t = Tag(name=tn, is_ai_generated=False, user_id=user.id)
+            db.add(t)
+            await db.flush()
+        a.tags.append(t)
+        applied.append(tn)
+    await db.commit()
+    return f"已设置标签:{', '.join(applied) if applied else '(清空)'}"
+
+
+_WRITE_FUNCS = {
+    "add_article": _tool_add_article,
+    "add_note": _tool_add_note,
+    "update_article": _tool_update_article,
+    "set_article_tags": _tool_set_tags,
 }
 
 
@@ -212,13 +393,21 @@ async def mcp_endpoint(
     if method == "ping":
         return JSONResponse(_ok(req_id, {}))
 
+    write_on = bool(getattr(current_user, "mcp_write_enabled", False))
+
     if method == "tools/list":
-        return JSONResponse(_ok(req_id, {"tools": TOOLS}))
+        tools = READ_TOOLS + (WRITE_TOOLS if write_on else [])
+        return JSONResponse(_ok(req_id, {"tools": tools}))
 
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
-        fn = _TOOL_FUNCS.get(name)
+        fn = _READ_FUNCS.get(name) or (_WRITE_FUNCS.get(name) if write_on else None)
+        if name in _WRITE_FUNCS and not write_on:
+            return JSONResponse(_ok(req_id, {
+                "content": [{"type": "text", "text": "MCP 写入未开启。请到网页「个人设置 → 外部 AI 接入(MCP)」打开「允许写入」开关。"}],
+                "isError": True,
+            }))
         if not fn:
             return JSONResponse(_err(req_id, -32602, f"Unknown tool: {name}"))
         try:
