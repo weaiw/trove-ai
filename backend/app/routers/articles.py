@@ -2,9 +2,12 @@
 import os
 import hashlib
 
+import jieba
+
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, BackgroundTasks, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, desc, text, update
+from sqlalchemy.orm import defer
 from typing import Optional, List
 from uuid import UUID
 
@@ -837,8 +840,18 @@ async def list_articles(
     username_query: str | None = Query(None, alias="username", description="Superadmin: filter by username"),
 ):
     """List articles with filtering, search, and pagination."""
-    
-    query = select(Article)
+    import logging
+    logger = logging.getLogger(__name__)
+
+    list_options = (
+        defer(Article.raw_content),
+        defer(Article.clean_content),
+        defer(Article.plain_text),
+        defer(Article.embedding),
+        defer(Article.mindmap_data),
+        defer(Article.images),
+    )
+    query = select(Article).options(*list_options)
     count_query = select(func.count(Article.id))
     
     # User isolation: superadmin sees own by default, or specific user via ?username=xxx
@@ -871,62 +884,99 @@ async def list_articles(
             func.lower(Tag.name) == tag.lower()
         )
     
-    # Search — semantic by default, keyword fallback
-    if search:
-        if search_mode == "semantic":
-            try:
-                query_embedding = await llm_service.get_embedding(search, emb_type="query")
-                query = query.where(Article.embedding.isnot(None))
-                query = query.order_by(Article.embedding.cosine_distance(query_embedding))
-                count_query = count_query.where(Article.embedding.isnot(None))
-            except Exception:
-                # Fallback to keyword search on embedding failure
-                search_filter = or_(
-                    Article.title.ilike(f"%{search}%"),
-                    Article.plain_text.ilike(f"%{search}%"),
-                    Article.summary.ilike(f"%{search}%"),
-                )
-                query = query.where(search_filter).order_by(desc(Article.created_at))
-                count_query = count_query.where(search_filter)
-        else:
-            search_filter = or_(
-                Article.title.ilike(f"%{search}%"),
-                Article.plain_text.ilike(f"%{search}%"),
-                Article.summary.ilike(f"%{search}%"),
-            )
-            query = query.where(search_filter).order_by(desc(Article.created_at))
-            count_query = count_query.where(search_filter)
-    else:
-        sort_col = getattr(Article, sort)
-        query = query.order_by(desc(sort_col))
-
     # Source platform filter (case-insensitive)
     if source_platform:
         platform_filter = func.lower(Article.source_platform) == source_platform.lower()
         query = query.where(platform_filter)
         count_query = count_query.where(platform_filter)
-    
-    # Count
-    total_result = await db.execute(count_query)
-    total = total_result.scalar()
-    
-    # Sort (only when no search — search modes handle their own ordering)
-    if not search:
+
+    search_mode_used = None
+    if search:
+        # Hybrid retrieval: run semantic and keyword routes in parallel, fuse with RRF.
+        # Both routes can return zero rows; we degrade gracefully (e.g. if the embedding
+        # service is down, semantic returns nothing and keyword still works).
+        search_mode_used = "hybrid"
+        TOP_K = 50
+        RRF_K = 60
+        SEMANTIC_DISTANCE_THRESHOLD = 0.6
+
+        # Tokenize so Chinese compound queries like "职业方法论" match articles
+        # containing "职业" or "方法论" separately. jieba handles Chinese; for
+        # English / mixed input lcut_for_search degrades to sane substring splits.
+        tokens = [t for t in jieba.lcut_for_search(search) if len(t.strip()) >= 2]
+        if not tokens:
+            tokens = [search]
+        keyword_filter = or_(*[
+            or_(
+                Article.title.ilike(f"%{tok}%"),
+                Article.plain_text.ilike(f"%{tok}%"),
+                Article.summary.ilike(f"%{tok}%"),
+            )
+            for tok in tokens
+        ])
+        kw_subq = (
+            query.with_only_columns(Article.id)
+            .where(keyword_filter)
+            .order_by(desc(Article.created_at))
+            .limit(TOP_K)
+        )
+        kw_ids = [row[0] for row in (await db.execute(kw_subq)).all()]
+
+        sem_ids: List[UUID] = []
+        try:
+            query_embedding = await llm_service.get_embedding(search, emb_type="query")
+            distance_expr = Article.embedding.cosine_distance(query_embedding)
+            sem_subq = (
+                query.with_only_columns(Article.id)
+                .where(
+                    Article.embedding.isnot(None),
+                    distance_expr < SEMANTIC_DISTANCE_THRESHOLD,
+                )
+                .order_by(distance_expr)
+                .limit(TOP_K)
+            )
+            sem_ids = [row[0] for row in (await db.execute(sem_subq)).all()]
+        except Exception as e:
+            search_mode_used = "hybrid (keyword-only)"
+            logger.warning(f"semantic route failed, hybrid degrades to keyword-only: {e}")
+
+        # Reciprocal Rank Fusion
+        scores: dict = {}
+        for rank, aid in enumerate(sem_ids, start=1):
+            scores[aid] = scores.get(aid, 0.0) + 1.0 / (RRF_K + rank)
+        for rank, aid in enumerate(kw_ids, start=1):
+            scores[aid] = scores.get(aid, 0.0) + 1.0 / (RRF_K + rank)
+        fused_ids = [aid for aid, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
+        total = len(fused_ids)
+        logger.info(
+            f"hybrid search for '{search[:80]}': semantic={len(sem_ids)} keyword={len(kw_ids)} fused={total}"
+        )
+
+        offset = (page - 1) * page_size
+        page_ids = fused_ids[offset:offset + page_size]
+        if page_ids:
+            result = await db.execute(select(Article).options(*list_options).where(Article.id.in_(page_ids)))
+            by_id = {a.id: a for a in result.scalars().all()}
+            articles = [by_id[aid] for aid in page_ids if aid in by_id]
+        else:
+            articles = []
+    else:
+        total = (await db.execute(count_query)).scalar()
         sort_col = getattr(Article, sort)
         query = query.order_by(desc(sort_col))
-    
-    # Paginate
-    offset = (page - 1) * page_size
-    query = query.offset(offset).limit(page_size)
-    
-    result = await db.execute(query)
-    articles = result.scalars().all()
-    
+
+        offset = (page - 1) * page_size
+        query = query.offset(offset).limit(page_size)
+
+        result = await db.execute(query)
+        articles = result.scalars().all()
+
     return ArticleListResponse(
         items=articles,
         total=total,
         page=page,
         page_size=page_size,
+        search_mode_used=search_mode_used,
     )
 
 

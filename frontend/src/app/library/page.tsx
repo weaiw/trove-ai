@@ -42,13 +42,13 @@ export default function LibraryPage() {
   const searchParams = useSearchParams();
   const [articles, setArticles] = useState<Article[]>([]);
   const [total, setTotal] = useState(0);
+  const [searchModeUsed, setSearchModeUsed] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [username, setUsername] = useState('');
 
   const [search, setSearch] = useState('');
-  const [searchMode, setSearchMode] = useState<'semantic' | 'keyword'>('semantic');
   const [statusFilter, setStatusFilter] = useState('');
   const [tagFilter, setTagFilter] = useState('');
   const [folderFilter, setFolderFilter] = useState('');
@@ -101,6 +101,9 @@ export default function LibraryPage() {
     setTimeout(() => setToast(null), 3000);
   };
 
+  const searchRef = useRef(search);
+  searchRef.current = search;
+
   const fetchArticles = useCallback(async () => {
     setLoading(true); setError('');
     try {
@@ -109,14 +112,15 @@ export default function LibraryPage() {
       if (tagFilter) params.tag = tagFilter;
       if (folderFilter) params.folder_id = folderFilter;
       if (sourceFilter) params.source_platform = sourceFilter;
-      if (search) { params.search = search; params.search_mode = searchMode; }
+      if (searchRef.current) { params.search = searchRef.current; params.search_mode = "semantic"; }
       if (username) params.username = username;
       const data = await api.getArticles(params) as ArticleListResponse;
       setArticles(data.items); setTotal(data.total);
+      setSearchModeUsed(data.search_mode_used || null);
     } catch (e: any) {
       setError(e.message || '加载失败');
     } finally { setLoading(false); }
-  }, [page, statusFilter, tagFilter, folderFilter, sourceFilter, search, searchMode, username]);
+  }, [page, statusFilter, tagFilter, folderFilter, sourceFilter, username]);
 
   const fetchTags = async () => { try { setTags(await api.getTags()); } catch {} };
   const fetchFolders = async () => { try { setFolders(await api.getFolders()); } catch {} };
@@ -165,7 +169,6 @@ export default function LibraryPage() {
 
   // Debounced search via ref to avoid stale closure
   useEffect(() => { const t = setTimeout(() => { setPage(1); fetchArticlesRef.current(); }, 300); return () => clearTimeout(t); }, [search]);
-  useEffect(() => { if (search) { setPage(1); fetchArticlesRef.current(); } }, [searchMode]);
 
   const toggleSelect = (id: string) => {
     const next = new Set(selectedIds);
@@ -580,7 +583,7 @@ export default function LibraryPage() {
                   </span>
                 )}
               </div>
-              <p className="text-sm text-[var(--text-tertiary)] mt-1">{total} 篇文章</p>
+              <p className="text-sm text-[var(--text-tertiary)] mt-1">{total} 篇文章{searchModeUsed === "hybrid (keyword-only)" && <span className="text-amber-600 dark:text-amber-400 ml-2">语义搜索暂时不可用，已降级为关键词搜索</span>}</p>
             </div>
           </div>
           <div className="flex gap-2">
@@ -596,19 +599,8 @@ export default function LibraryPage() {
           <div className="relative">
             <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-tertiary)]" />
             <input type="text" value={search} onChange={e => setSearch(e.target.value)}
-              placeholder={searchMode === 'semantic' ? '语义搜索 — 按意思匹配内容...' : '关键词搜索 — 精确匹配标题或内容...'}
-              className="w-full pl-10 pr-20 py-2.5 bg-[var(--bg-secondary)] rounded-lg text-sm outline-none focus:ring-2 focus:ring-[#007aff]/20 transition-all" />
-            <button
-              onClick={() => { setSearchMode(m => m === 'semantic' ? 'keyword' : 'semantic'); if (search) { setPage(1); } }}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-[11px] rounded-md font-medium transition-colors"
-              style={{
-                backgroundColor: searchMode === 'semantic' ? 'rgba(0,122,255,0.1)' : 'var(--bg-tertiary)',
-                color: searchMode === 'semantic' ? 'var(--accent)' : 'var(--text-tertiary)',
-              }}
-              title={searchMode === 'semantic' ? '点击切换为关键词搜索' : '点击切换为语义搜索'}
-            >
-              {searchMode === 'semantic' ? '🧠 语义' : '🔤 关键词'}
-            </button>
+              placeholder="搜索文章标题或内容..."
+              className="w-full pl-10 pr-4 py-2.5 bg-[var(--bg-secondary)] rounded-lg text-sm outline-none focus:ring-2 focus:ring-[#007aff]/20 transition-all" />
           </div>
 
           <div className="flex gap-1 p-1 bg-[var(--bg-secondary)] rounded-lg">
