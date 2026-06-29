@@ -108,6 +108,7 @@ class ArticleListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    search_mode_used: Optional[str] = None
 
 # ---- Knowledge Graph ----
 class KnowledgeEdgeResponse(BaseModel):

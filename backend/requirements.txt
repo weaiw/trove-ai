@@ -32,3 +32,4 @@ json-repair>=0.30.0
 qrcode[pil]>=7.4.0
 networkx>=3.2,<4
 python-louvain>=0.16
+jieba>=0.42.1  # 中文分词,hybrid search 的关键词分支用
