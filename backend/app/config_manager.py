@@ -124,6 +124,28 @@ CONFIG_SCHEMA: Dict[str, dict] = {
         ],
         "test_provider": "embedding",
     },
+    "xhs": {
+        "label": "小红书",
+        "description": (
+            "用于解析小红书笔记（web_session cookie，几周到几个月失效一次）。"
+            "从浏览器登录 xiaohongshu.com 后，F12 → Application → Cookies "
+            "复制 web_session 的值粘贴到此处。失效后文章会标"
+            "「解析失败」，重新获取一次即可。"
+        ),
+        "icon": "cookie",
+        "fields": [
+            {
+                "key": "web_session",
+                "label": "web_session cookie",
+                "type": "password",
+                "default": "",
+                "placeholder": "粘贴 web_session 的值",
+                "required": False,
+                "secret": True,
+            },
+        ],
+        "test_provider": None,
+    },
 }
 
 
