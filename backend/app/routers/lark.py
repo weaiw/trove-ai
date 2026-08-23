@@ -27,6 +27,13 @@ router = APIRouter(prefix="/api/lark", tags=["lark"])
 URL_RE = re.compile(r"https?://[^\s<>\]\[\"']+")
 
 
+def _has_url_folder_intent(text: str) -> bool:
+    return bool(URL_RE.search(text or "")) and any(
+        keyword in (text or "")
+        for keyword in ("文件夹", "入库到", "保存到", "存到", "放到", "归入", "归到", "归档到")
+    )
+
+
 def _hash_code(code: str) -> str:
     return hashlib.sha256(f"lark:{code}".encode()).hexdigest()
 
@@ -199,7 +206,7 @@ async def _process_message_event(payload: dict) -> None:
 
             if msg_type == "text":
                 if text in {"/help", "帮助"}:
-                    await lark.send_text(chat_id, "直接发链接可入库；发问题可调用知识管理 Agent；也支持文件、图片和语音输入。")
+                    await lark.send_text(chat_id, "直接发链接可入库；发『把链接入库到 X 文件夹』可自动归类；发问题可调用知识管理 Agent；也支持文件、图片和语音输入。")
                     return
                 url_match = URL_RE.search(text)
                 if text.lower() in {"确认", "确认执行", "执行", "执行吧", "同意", "ok", "yes"} and binding.pending_action:
@@ -209,7 +216,7 @@ async def _process_message_event(payload: dict) -> None:
                     finally:
                         binding.pending_action = None
                         await db.commit()
-                elif url_match:
+                elif url_match and not _has_url_folder_intent(text):
                     reply = await backend.add_url(binding.user_id, url_match.group(0))
                 else:
                     result = await backend.agent_result(binding.user_id, text, binding.agent_session_id)

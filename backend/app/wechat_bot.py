@@ -92,6 +92,7 @@ LIGHT_COMMANDS = {
 WRITE_TOOL_LABELS = {
     "tag_articles": "打标签",
     "move_to_folder": "归类到文件夹",
+    "save_url_to_folder": "链接入库并归类",
     "link_articles": "建立知识关系",
     "synthesize_concept": "合成概念页",
     "configure_review": "配置复习简报",
@@ -106,6 +107,8 @@ def _confirm_summary(name: str, args: dict) -> str:
         details.append(f"影响文章：{len(args['article_ids'])} 篇")
     if args.get("folder_name"):
         details.append(f"目标文件夹：{args['folder_name']}")
+    if args.get("url"):
+        details.append(f"链接：{args['url']}")
     if args.get("tag"):
         details.append(f"标签：{args['tag']}")
     if args.get("topic"):
@@ -160,6 +163,14 @@ def _client_id() -> str:
 def _extract_url(text: str) -> Optional[str]:
     m = URL_RE.search(html.unescape(text or ""))
     return m.group(0).rstrip(".,;:!?)]") if m else None
+
+
+def _has_url_folder_intent(text: str) -> bool:
+    """Compound URL commands belong to the Agent; plain URLs keep the fast path."""
+    return bool(_extract_url(text)) and any(
+        keyword in (text or "")
+        for keyword in ("文件夹", "入库到", "保存到", "存到", "放到", "归入", "归到", "归档到")
+    )
 
 
 def _safe_filename(name: str, fallback: str = "wechat-file") -> str:
@@ -616,6 +627,7 @@ class AccountWorker:
                 client, acct.base_url, acct.token, sender, ctx,
                 "📚 Trove AI 用法\n\n"
                 "• 直接发链接 → 自动存入你的知识库\n"
+                "• 发『把链接入库到 X 文件夹』→ 确认后自动建/复用文件夹并归类\n"
                 "• 直接发问题 → 知识管理 Agent 帮你办：\n"
                 "  ◦ 库内问答 / 最近收藏回顾 / 库内材料对比\n"
                 "  ◦ 找素材：『帮我从库里挑 5 篇做 AI Agent 综述的素材』\n"
@@ -635,7 +647,7 @@ class AccountWorker:
             return
 
         url = _extract_url(text)
-        if url:
+        if url and not _has_url_folder_intent(text_stripped):
             ok, reply = await self.lm.add_article(acct.user_id, url)
             logger.info(f"[{acct.account_id}] add_article ok={ok} → {reply[:80]}")
             await self._send_text(client, acct.base_url, acct.token, sender, ctx, reply)

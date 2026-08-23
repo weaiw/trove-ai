@@ -81,6 +81,7 @@ const STAGE_ICONS: Record<string, string> = {
 const WRITE_TOOL_LABELS: Record<string, string> = {
   tag_articles: "打标签",
   move_to_folder: "归类到文件夹",
+  save_url_to_folder: "链接入库并归类",
   link_articles: "建立知识关系",
   synthesize_concept: "合成概念页",
   configure_review: "配置复习简报",
@@ -92,6 +93,7 @@ function getConfirmSummary(pending: { name: string; args: any }) {
   const details: string[] = [];
   if (Array.isArray(args.article_ids)) details.push(`影响 ${args.article_ids.length} 篇文章`);
   if (args.folder_name) details.push(`文件夹：${args.folder_name}`);
+  if (args.url) details.push(`链接：${args.url}`);
   if (args.tag) details.push(`标签：${args.tag}`);
   if (args.topic) details.push(`主题：${args.topic}`);
   if (args.relation_type) details.push(`关系：${args.relation_type}`);

@@ -4,6 +4,14 @@ All notable changes to Trove AI are documented here. This project adheres to [Se
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-08-23
+
+### Added
+- **Agent URL-to-folder action** — web, WeChat, and Feishu now understand both “create folder X and save URL Y into it” and “save URL Y into folder X”. The confirmed write action creates or reuses the folder, ingests a new URL through the existing AI-processing pipeline, and moves an already-saved URL without duplicating it.
+
+### Changed
+- Channel adapters keep the fast path for plain URLs, but route URL messages with folder/organization intent to the unified Agent so the full instruction is preserved.
+
 ## [1.4.0] — 2026-08-23
 
 ### Added

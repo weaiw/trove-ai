@@ -30,6 +30,7 @@ logger = logging.getLogger("trove.tool-agent")
 MAX_STEPS = 8                  # hard cap on tool-loop iterations
 MAX_TOOL_RESULT_CHARS = 4000   # truncate large tool outputs before feeding back to LLM
 LIBRARY_TOP_K = 5
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 # Use DeepSeek-V3 via SiliconFlow for reliable function calling.
 SF_MODEL = "deepseek-ai/DeepSeek-V3"
@@ -180,6 +181,35 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["article_ids", "folder_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_url_to_folder",
+            "description": (
+                "把一个网页链接采集入知识库并归类到指定文件夹；文件夹不存在会自动新建，"
+                "链接已入库则直接移动到目标文件夹。适用于『把这个链接入库到某文件夹』或"
+                "『创建某文件夹并把链接放进去』。这是写操作，调用前须向用户展示 URL 和目标文件夹。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "要采集的完整 http/https URL",
+                    },
+                    "folder_name": {
+                        "type": "string",
+                        "description": "目标文件夹名，如 'AI Agent'、'产品资料'",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "为什么保存到这个文件夹，一句话，给用户看",
+                    },
+                },
+                "required": ["url", "folder_name"],
             },
         },
     },
@@ -386,7 +416,7 @@ TOOL_SCHEMAS = [
 # 写工具名单：在此集合中的工具会被"确认闸"拦截（见 _execute_tool）。
 # 注意 find_duplicates 是【只读】，不在此名单——它只找不删，无需确认。
 WRITE_TOOLS = {
-    "tag_articles", "move_to_folder", "link_articles",
+    "tag_articles", "move_to_folder", "save_url_to_folder", "link_articles",
     "synthesize_concept", "configure_review",
 }
 
@@ -589,6 +619,96 @@ async def _tool_move_to_folder(
         "moved_count": len(moved),
         "moved": moved,
         "skipped": skipped,
+    }
+
+
+async def _tool_save_url_to_folder(
+    db: AsyncSession,
+    user_id: UUID,
+    url: str,
+    folder_name: str,
+    reason: str = "",
+) -> dict:
+    """采集一个 URL 并归类；已存在的文章只移动，不重复抓取。"""
+    from app.models import Article, Folder
+    from app.services.parser_service import extract_url_from_text, parser_service
+
+    clean_url = extract_url_from_text(url or "") or (url or "").strip()
+    fname = (folder_name or "").strip()
+    if not clean_url.startswith(("http://", "https://")):
+        return {"error": "url must be a valid http/https URL"}
+    if not fname:
+        return {"error": "folder_name is empty"}
+
+    folder = (await db.execute(
+        select(Folder).where(
+            func.lower(Folder.name) == fname.lower(), Folder.user_id == user_id
+        )
+    )).scalar_one_or_none()
+    folder_created = False
+    if not folder:
+        folder = Folder(name=fname, user_id=user_id)
+        db.add(folder)
+        await db.flush()
+        folder_created = True
+
+    article = (await db.execute(
+        select(Article).where(Article.url == clean_url, Article.user_id == user_id)
+    )).scalar_one_or_none()
+    if article:
+        article.folder_id = folder.id
+        await db.commit()
+        return {
+            "action": "save_url_to_folder",
+            "url": clean_url,
+            "folder": fname,
+            "folder_created": folder_created,
+            "article_id": str(article.id),
+            "title": article.title or "Untitled",
+            "article_created": False,
+            "reason": reason,
+        }
+
+    try:
+        content_data = await parser_service.fetch_content(clean_url)
+    except Exception as exc:
+        await db.rollback()
+        return {"error": f"failed to fetch URL: {exc}"}
+
+    article = Article(
+        url=clean_url,
+        title=content_data.get("title") or "Untitled",
+        raw_content=content_data.get("raw_content") or "",
+        source_platform=content_data.get("platform"),
+        author=content_data.get("author"),
+        cover_image=content_data.get("cover_image"),
+        folder_id=folder.id,
+        user_id=user_id,
+    )
+    db.add(article)
+    await db.commit()
+    await db.refresh(article)
+
+    # 与普通 URL 入库复用同一后台处理链：清洗、摘要、标签、向量和关联分析。
+    from app.routers.articles import process_article_background
+    task = asyncio.create_task(process_article_background(
+        article.id,
+        content_data.get("raw_content") or "",
+        content_data.get("raw_html") or "",
+        clean_url,
+        None,
+    ))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return {
+        "action": "save_url_to_folder",
+        "url": clean_url,
+        "folder": fname,
+        "folder_created": folder_created,
+        "article_id": str(article.id),
+        "title": article.title or "Untitled",
+        "article_created": True,
+        "reason": reason,
     }
 
 
@@ -930,6 +1050,12 @@ async def _execute_tool(
                 args.get("article_ids", []), args.get("folder_name", ""),
                 args.get("reason", ""),
             )
+        if name == "save_url_to_folder":
+            return await _tool_save_url_to_folder(
+                db, user_id,
+                args.get("url", ""), args.get("folder_name", ""),
+                args.get("reason", ""),
+            )
         if name == "link_articles":
             return await _tool_link_articles(
                 db, user_id,
@@ -1142,6 +1268,7 @@ SYSTEM_PROMPT = """你是用户的个人研究助理 Agent。你可以调用工�
 - 你有几个会改变用户数据的**写工具**：
   · tag_articles —— 给文章追加标签
   · move_to_folder —— 把文章归类到文件夹（不存在会新建）
+  · save_url_to_folder —— 把新链接入库到指定文件夹，或把已入库链接移到该文件夹
   · link_articles —— 在两篇文章间建知识图谱关系
   · synthesize_concept —— 把同一概念跨多篇合成一页概念页
   · configure_review —— 配置用户级定期复习简报（开关/频率/时间）
@@ -1149,6 +1276,8 @@ SYSTEM_PROMPT = """你是用户的个人研究助理 Agent。你可以调用工�
   **绝对不要自己先用一段文字去征求用户同意、然后停下不调工具** —— 系统有一道"确认闸"会自动拦下这次调用并让用户在界面上点「确认执行」，你不需要自己模拟这个过程。
 - 写工具若返回 `status="pending_confirmation"`，表示系统已经拦下、正等用户点确认。此时你只需**用一句话说明"我准备做什么、对哪些对象、为什么"**，然后停下、不要再调任何工具。用户点「确认执行」后系统会自动重试，那次才真正落库。
 - 一句话：**该写就直接调写工具**，确认这件事交给系统，不要自己用文字代替。
+- 用户说『创建文件夹 X，把链接 Y 入库到该文件夹』或『把链接 Y 入库到 X 文件夹』时，
+  直接调用 save_url_to_folder；不要先调用 move_to_folder，也不要要求链接必须已经在库里。
 - 读类工具无需确认，可直接调用：search_library / read_article / list_recent_articles / find_duplicates（找疑似重复，只列不删）/ web_search / web_read（联网）/ remember（记长期记忆）。
 
 能力边界（别承诺做不到的事）：
@@ -1246,7 +1375,8 @@ async def run_tool_agent(
                 )
                 TOOL_NAMES = (
                     "search_library", "read_article", "list_recent_articles", "find_duplicates",
-                    "web_search", "web_read", "tag_articles", "move_to_folder", "link_articles",
+                    "web_search", "web_read", "tag_articles", "move_to_folder",
+                    "save_url_to_folder", "link_articles",
                     "synthesize_concept", "configure_review", "remember",
                 )
                 fake_tool_call = (("\"name\"" in answer or "调用工具" in answer or "调用 " in answer)
@@ -1364,6 +1494,13 @@ def _summarize_result(name: str, result: dict) -> str:
         n = result.get("moved_count", 0)
         nf = "（新建）" if result.get("folder_created") else ""
         return f"📁 move_to_folder：{n} 篇 → 「{result.get('folder', '')}」{nf}"
+    if name == "save_url_to_folder":
+        nf = "（新建文件夹）" if result.get("folder_created") else ""
+        action = "已入库" if result.get("article_created") else "已归类"
+        return (
+            f"📥 save_url_to_folder：{action}《{(result.get('title') or 'Untitled')[:24]}》"
+            f"→「{result.get('folder', '')}」{nf}"
+        )
     if name == "link_articles":
         if result.get("status") == "already linked":
             return f"🔗 link_articles：已存在关系，跳过"
