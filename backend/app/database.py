@@ -36,6 +36,9 @@ async def get_db() -> AsyncSession:
 async def init_db():
     import os, glob, re
     async with engine.begin() as conn:
+        # Multiple Uvicorn workers start together. Serialize schema work so they
+        # do not deadlock while running the same DDL concurrently.
+        await conn.exec_driver_sql("SELECT pg_advisory_xact_lock(824312657)")
         await conn.run_sync(Base.metadata.create_all)
         # Run migration SQL files from migrations directory
         migrations_dir = os.path.join(os.path.dirname(__file__), 'migrations')
@@ -49,7 +52,11 @@ async def init_db():
                     statement = statement.strip()
                     if statement:
                         try:
-                            await conn.execute(text(statement))
+                            # Keep one bad/obsolete statement from aborting every later
+                            # migration. Driver SQL also avoids treating colons in SQL
+                            # comments as SQLAlchemy bind parameters.
+                            async with conn.begin_nested():
+                                await conn.exec_driver_sql(statement)
                         except Exception as e:
                             print(f"⚠️  Migration warning ({os.path.basename(sql_file)}): {e}")
 
@@ -57,6 +64,9 @@ async def init_db():
 def _split_sql(sql: str) -> list[str]:
     """Split SQL into statements, keeping DO $$...$$ blocks intact."""
     statements = []
+    # A semicolon in a line comment is not a statement boundary. Removing line
+    # comments also keeps prose containing ':' from reaching the SQL driver.
+    sql = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
     # Replace $$ delimited blocks with placeholders to avoid splitting inside them
     dollar_blocks = []
     

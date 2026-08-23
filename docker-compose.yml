@@ -44,7 +44,7 @@ services:
     restart: "no"
 
   mihomo:
-    image: ghcr.io/metacubex/mihomo:latest
+    image: metacubex/mihomo:latest
     container_name: trove-mihomo
     command: -d /root/.config/mihomo
     depends_on:

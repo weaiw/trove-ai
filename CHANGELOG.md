@@ -4,6 +4,12 @@ All notable changes to Trove AI are documented here. This project adheres to [Se
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-08-23
+
+### Fixed
+- Migration startup is serialized with a PostgreSQL advisory lock for multi-worker deployments. Statements run inside individual savepoints, so one obsolete or already-conflicting statement cannot abort later migrations; SQL line comments are removed before splitting to avoid false boundaries and bind parameters.
+- The Mihomo sidecar uses its Docker Hub image, which is reachable from more mainland-China deployment environments than GHCR.
+
 ## [1.4.1] — 2026-08-23
 
 ### Added
