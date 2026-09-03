@@ -53,6 +53,7 @@ export interface ArticleListResponse {
   total: number;
   page: number;
   page_size: number;
+  search_mode_used?: string;
 }
 
 export interface KnowledgeEdge {
